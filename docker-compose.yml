@@ -1,0 +1,21 @@
+services:
+  companion-updater:
+    build: .
+    container_name: companion-updater
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      # Docker socket for container control
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Companion docker directory for rebuild
+      - /opt/companion-docker:/opt/companion-docker:ro
+    environment:
+      - COMPANION_DOCKER_PATH=/opt/companion-docker
+      - GITHUB_REPO=bitfocus/companion
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge
