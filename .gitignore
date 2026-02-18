@@ -5,7 +5,10 @@ __pycache__/
 *.so
 .Python
 venv/
+
+# Environment files (may contain secrets)
 .env
+!.env.example
 
 # IDE
 .idea/

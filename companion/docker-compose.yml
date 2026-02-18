@@ -1,0 +1,32 @@
+services:
+  companion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: companion
+    restart: unless-stopped
+    network_mode: host
+    group_add:
+      - "${COMPANION_USB_GID:-983}"
+    device_cgroup_rules:
+      - 'c 241:* rwm'  # hidraw devices
+      - 'c 189:* rwm'  # USB devices
+    volumes:
+      - /dev:/dev:rslave
+      - /run/udev:/run/udev:ro
+      - /opt/companion:/companion
+    environment:
+      COMPANION_CONFIG_BASEDIR: /companion/v4.1
+      CLOUDFLARE_TUNNEL_TOKEN: "${CLOUDFLARE_TUNNEL_TOKEN:-}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+        reservations:
+          memory: 512M

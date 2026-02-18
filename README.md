@@ -1,105 +1,160 @@
-# Companion Update Dashboard
+# Bitfocus Companion Docker Setup
 
-A lightweight web dashboard for managing Bitfocus Companion container updates.
-
-![Dashboard Screenshot](https://img.shields.io/badge/Companion-Update%20Dashboard-blue)
+Complete Docker setup for [Bitfocus Companion](https://bitfocus.io/companion) with automatic updates dashboard.
 
 ## Features
 
-- View current vs latest Companion version
-- One-click updates with live progress streaming
-- Rate limiting (5-minute cooldown between updates)
-- Container status monitoring
-- GitHub API integration for version checking
-
-## Prerequisites
-
-- Docker and Docker Compose
-- Bitfocus Companion running in Docker
-- Companion container named `companion`
-- Companion docker-compose at `/opt/companion-docker/`
+- **Companion Container**: Custom image with mDNS/Avahi support, Cloudflare Tunnel, Stream Deck USB access
+- **Update Dashboard**: Web UI to check for updates and one-click update Companion
+- **Persistent Data**: All configuration stored on host, survives updates
+- **USB Support**: Stream Deck and other USB devices work out of the box
 
 ## Quick Start
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/companion-updater.git /opt/companion-updater
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/zbynekdrlik/companion-updater.git
+cd companion-updater
 
-2. Update your Companion Dockerfile to use the `:latest` tag:
-   ```dockerfile
-   FROM ghcr.io/bitfocus/companion/companion:latest
-   ```
+# Run setup script
+chmod +x setup.sh
+./setup.sh
+```
 
-3. Start the dashboard:
-   ```bash
-   cd /opt/companion-updater
-   docker compose up -d --build
-   ```
+That's it! Access:
+- **Companion**: `http://<your-ip>:8000`
+- **Update Dashboard**: `http://<your-ip>:8081`
 
-4. Access the dashboard at `http://<your-server-ip>:8081`
+## Manual Installation
+
+### 1. Companion
+
+```bash
+# Create directories
+sudo mkdir -p /opt/companion /opt/companion-docker
+sudo chown $USER:$USER /opt/companion /opt/companion-docker
+
+# Copy files
+cp -r companion/* /opt/companion-docker/
+cp companion/.env.example /opt/companion-docker/.env
+
+# Edit configuration (optional)
+nano /opt/companion-docker/.env
+
+# Start Companion
+cd /opt/companion-docker
+docker compose up -d --build
+```
+
+### 2. Update Dashboard
+
+```bash
+# Copy files
+sudo mkdir -p /opt/companion-updater
+sudo chown $USER:$USER /opt/companion-updater
+cp -r updater/* /opt/companion-updater/
+
+# Start dashboard
+cd /opt/companion-updater
+docker compose up -d --build
+```
+
+## Directory Structure
+
+```
+Repository:
+├── companion/           # Companion Docker setup
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── entrypoint.sh
+│   └── .env.example
+├── updater/             # Update Dashboard
+│   ├── Dockerfile
+│   ├── docker-compose.yml
+│   ├── requirements.txt
+│   └── app/
+├── setup.sh             # One-click installer
+└── README.md
+
+On your server after setup:
+/opt/companion/          # Persistent data (configs, buttons, connections)
+/opt/companion-docker/   # Companion container files
+/opt/companion-updater/  # Update dashboard files
+```
 
 ## Configuration
 
-Environment variables (set in `docker-compose.yml`):
+### Environment Variables (companion/.env)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `COMPANION_DOCKER_PATH` | `/opt/companion-docker` | Path to Companion's docker-compose directory |
-| `COMPANION_CONTAINER_NAME` | `companion` | Name of the Companion container |
-| `GITHUB_REPO` | `bitfocus/companion` | GitHub repository to check for releases |
+| Variable | Description |
+|----------|-------------|
+| `COMPANION_USB_GID` | Group ID for USB access (default: 983) |
+| `CLOUDFLARE_TUNNEL_TOKEN` | Optional: Cloudflare Tunnel token for remote access |
 
-## API Endpoints
+### Finding USB Group ID
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Dashboard HTML page |
-| `/api/status` | GET | JSON with version status |
-| `/api/update` | POST | Trigger update (non-streaming) |
-| `/api/update/stream` | GET | SSE stream for live update progress |
+```bash
+# Find the group ID for USB devices
+getent group | grep -E 'usb|plugdev'
+# Or check Stream Deck device
+ls -la /dev/hidraw*
+```
+
+## Ports
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Companion | 8000 | Main web interface |
+| Companion | 16622 | Satellite API |
+| Update Dashboard | 8081 | Update management UI |
 
 ## How Updates Work
 
-1. Pulls the latest `ghcr.io/bitfocus/companion/companion:latest` image
-2. Rebuilds your custom Companion image with `docker compose build --no-cache`
-3. Restarts Companion with `docker compose up -d`
-4. Verifies the new version is running
+1. Dashboard checks GitHub for latest Companion release
+2. Click "Update Now" to:
+   - Pull latest `ghcr.io/bitfocus/companion/companion:latest`
+   - Rebuild your custom image
+   - Restart Companion container
+3. Your data in `/opt/companion` is preserved
 
-**Your Companion data is preserved** - it's stored in `/opt/companion` on the host, not inside the container.
+## Included Features
 
-## Architecture
+### Companion Container
+- **mDNS/Avahi**: Device discovery on local network
+- **Cloudflare Tunnel**: Optional remote access without port forwarding
+- **USB passthrough**: Stream Deck and other controllers
+- **Timezone**: Configurable (default: Europe/Bratislava)
 
-```
-Browser (LAN) --> Update Dashboard (port 8081)
-                        |
-                        +-- GitHub API (check latest version)
-                        +-- Docker socket (rebuild/restart Companion)
-```
+### Update Dashboard
+- Version comparison (current vs latest)
+- Live update progress via Server-Sent Events
+- Rate limiting (5-minute cooldown)
+- Container health monitoring
 
-## File Structure
+## Troubleshooting
 
-```
-/opt/companion-updater/
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-├── README.md
-└── app/
-    ├── __init__.py
-    ├── main.py              # FastAPI app + HTML template
-    ├── config.py            # Settings
-    └── services/
-        ├── __init__.py
-        ├── docker_ops.py    # Docker operations
-        ├── github.py        # GitHub API client
-        └── version.py       # Version comparison
+### Stream Deck not detected
+```bash
+# Check USB group
+ls -la /dev/hidraw*
+# Update COMPANION_USB_GID in .env to match the group
 ```
 
-## Security Notes
+### Container won't start
+```bash
+# Check logs
+docker logs companion
+docker logs companion-updater
+```
 
-- Dashboard is intended for LAN access only
-- Docker socket is mounted for container control
-- Rate limiting prevents accidental repeated updates
+### Update fails
+```bash
+# Manual update
+cd /opt/companion-docker
+docker compose pull
+docker compose build --no-cache
+docker compose up -d
+```
 
 ## License
 
