@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "companion-snv": {
+      "command": "npx",
+      "args": ["companion-mcp-server", "http://companion.lan:8000"]
+    },
+    "companion-pp": {
+      "command": "npx",
+      "args": ["companion-mcp-server", "http://companion-pp.lan:8000"]
+    }
+  }
+}

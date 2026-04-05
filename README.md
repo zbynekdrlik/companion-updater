@@ -25,6 +25,26 @@ That's it! Access:
 - **Companion**: `http://<your-ip>:8000`
 - **Update Dashboard**: `http://<your-ip>:8081`
 
+## Remote Deploy
+
+Deploy to `companion.lan` (or any target host) over SSH:
+
+```bash
+# Default: deploys to companion.lan as newlevel
+./deploy.sh
+
+# Override target host, user, or password
+COMPANION_HOST=10.0.0.50 COMPANION_USER=admin COMPANION_PASS=secret ./deploy.sh
+```
+
+The deploy script:
+1. Copies `companion/` and `updater/` files to the target
+2. Installs udev rules from `host/` to `/etc/udev/rules.d/`
+3. Rebuilds and restarts both Docker containers
+4. Waits for health checks to pass
+
+**Requirements:** `sshpass` must be installed on the machine running the deploy.
+
 ## Manual Installation
 
 ### 1. Companion
@@ -73,13 +93,12 @@ Repository:
 │   ├── docker-compose.yml
 │   ├── requirements.txt
 │   └── app/
-├── setup.sh             # One-click installer
+├── host/                # Udev rules for the target host
+│   ├── 50-elgato.rules
+│   └── 99-nldevicessetup.rules
+├── deploy.sh            # Deploy to remote host via SSH
+├── setup.sh             # One-click local installer
 └── README.md
-
-On your server after setup:
-/opt/companion/          # Persistent data (configs, buttons, connections)
-/opt/companion-docker/   # Companion container files
-/opt/companion-updater/  # Update dashboard files
 ```
 
 ## Configuration
@@ -88,17 +107,7 @@ On your server after setup:
 
 | Variable | Description |
 |----------|-------------|
-| `COMPANION_USB_GID` | Group ID for USB access (default: 983) |
 | `CLOUDFLARE_TUNNEL_TOKEN` | Optional: Cloudflare Tunnel token for remote access |
-
-### Finding USB Group ID
-
-```bash
-# Find the group ID for USB devices
-getent group | grep -E 'usb|plugdev'
-# Or check Stream Deck device
-ls -la /dev/hidraw*
-```
 
 ## Ports
 
@@ -135,9 +144,12 @@ ls -la /dev/hidraw*
 
 ### Stream Deck not detected
 ```bash
-# Check USB group
+# Check that hidraw devices exist
 ls -la /dev/hidraw*
-# Update COMPANION_USB_GID in .env to match the group
+# Verify udev rules are installed
+ls -la /etc/udev/rules.d/50-elgato.rules
+# Verify the container is running in privileged mode
+docker inspect companion --format='{{.HostConfig.Privileged}}'
 ```
 
 ### Container won't start

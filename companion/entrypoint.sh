@@ -5,14 +5,6 @@ set -euo pipefail
 mkdir -p /var/run/dbus
 rm -f /var/run/dbus/pid /run/dbus/pid
 
-# Add companion user to USB group for Stream Deck access
-# Create the group if it doesn't exist
-if ! getent group 983 >/dev/null 2>&1; then
-  groupadd -g 983 companionusb 2>/dev/null || true
-fi
-# Add companion user to the group
-usermod -a -G 983 companion 2>/dev/null || true
-
 if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
   dbus-daemon --system
 fi

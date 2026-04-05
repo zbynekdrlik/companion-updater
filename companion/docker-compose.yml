@@ -6,11 +6,7 @@ services:
     container_name: companion
     restart: unless-stopped
     network_mode: host
-    group_add:
-      - "${COMPANION_USB_GID:-983}"
-    device_cgroup_rules:
-      - 'c 241:* rwm'  # hidraw devices
-      - 'c 189:* rwm'  # USB devices
+    privileged: true
     volumes:
       - /dev:/dev:rslave
       - /run/udev:/run/udev:ro

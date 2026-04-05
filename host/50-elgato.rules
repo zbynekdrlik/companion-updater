@@ -1,0 +1,3 @@
+# Elgato Stream Deck devices — allow access for all users
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="0fd9", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0fd9", MODE="0666"

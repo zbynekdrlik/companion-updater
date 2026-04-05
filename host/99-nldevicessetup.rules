@@ -1,0 +1,3 @@
+# NL Devices Setup - Disable USB autosuspend
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/autosuspend}="-1"
+ACTION=="add", SUBSYSTEM=="usb", ATTR{power/control}="on"
