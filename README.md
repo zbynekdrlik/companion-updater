@@ -1,27 +1,36 @@
-# Bitfocus Companion Docker Setup
+# Bitfocus Companion Setup
 
-Complete Docker setup for [Bitfocus Companion](https://bitfocus.io/companion) with automatic updates dashboard.
+Production setup for [Bitfocus Companion](https://bitfocus.io/companion) with USB hot-plug support and remote access.
 
-## Features
+## Architecture
 
-- **Companion Container**: Custom image with mDNS/Avahi support, Cloudflare Tunnel, Stream Deck USB access
-- **Update Dashboard**: Web UI to check for updates and one-click update Companion
-- **Persistent Data**: All configuration stored on host, survives updates
-- **USB Support**: Stream Deck and other USB devices work out of the box
+- **Companion**: Native systemd service via [companion-pi](https://github.com/bitfocus/companion-pi) — direct USB/udev access for reliable Stream Deck hot-plug detection
+- **Cloudflare Tunnel**: Native systemd service for remote access without port forwarding
+- **Update Dashboard**: Docker container for checking and applying Companion updates
+- **Persistent Data**: Configuration stored at `~companion/.config/companion-nodejs/`
 
 ## Quick Start
 
-```bash
-# Clone the repository
-git clone https://github.com/zbynekdrlik/companion-updater.git
-cd companion-updater
+### 1. Install Companion (native)
 
-# Run setup script
-chmod +x setup.sh
-./setup.sh
+```bash
+curl https://raw.githubusercontent.com/bitfocus/companion-pi/main/install.sh | sudo bash
 ```
 
-That's it! Access:
+This installs Companion as a systemd service with USB support, udev rules, and auto-start on boot.
+
+### 2. Install Update Dashboard (Docker)
+
+```bash
+sudo mkdir -p /opt/companion-updater
+sudo chown $USER:$USER /opt/companion-updater
+cp -r updater/* /opt/companion-updater/
+cd /opt/companion-updater
+docker compose up -d --build
+```
+
+### 3. Access
+
 - **Companion**: `http://<your-ip>:8000`
 - **Update Dashboard**: `http://<your-ip>:8081`
 
@@ -38,57 +47,24 @@ COMPANION_HOST=10.0.0.50 COMPANION_USER=admin COMPANION_PASS=secret ./deploy.sh
 ```
 
 The deploy script:
-1. Copies `companion/` and `updater/` files to the target
-2. Installs udev rules from `host/` to `/etc/udev/rules.d/`
-3. Rebuilds and restarts both Docker containers
-4. Waits for health checks to pass
+1. Installs udev rules from `host/` to `/etc/udev/rules.d/`
+2. Updates Companion via `companion-update`
+3. Restarts the Companion systemd service
+4. Updates the companion-updater Docker container
+5. Waits for health checks to pass
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
-
-## Manual Installation
-
-### 1. Companion
-
-```bash
-# Create directories
-sudo mkdir -p /opt/companion /opt/companion-docker
-sudo chown $USER:$USER /opt/companion /opt/companion-docker
-
-# Copy files
-cp -r companion/* /opt/companion-docker/
-cp companion/.env.example /opt/companion-docker/.env
-
-# Edit configuration (optional)
-nano /opt/companion-docker/.env
-
-# Start Companion
-cd /opt/companion-docker
-docker compose up -d --build
-```
-
-### 2. Update Dashboard
-
-```bash
-# Copy files
-sudo mkdir -p /opt/companion-updater
-sudo chown $USER:$USER /opt/companion-updater
-cp -r updater/* /opt/companion-updater/
-
-# Start dashboard
-cd /opt/companion-updater
-docker compose up -d --build
-```
 
 ## Directory Structure
 
 ```
 Repository:
-├── companion/           # Companion Docker setup
+├── companion/           # Docker setup (legacy, kept for reference)
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   ├── entrypoint.sh
 │   └── .env.example
-├── updater/             # Update Dashboard
+├── updater/             # Update Dashboard (Docker)
 │   ├── Dockerfile
 │   ├── docker-compose.yml
 │   ├── requirements.txt
@@ -97,17 +73,21 @@ Repository:
 │   ├── 50-elgato.rules
 │   └── 99-nldevicessetup.rules
 ├── deploy.sh            # Deploy to remote host via SSH
-├── setup.sh             # One-click local installer
+├── setup.sh             # One-click local installer (legacy)
 └── README.md
 ```
 
 ## Configuration
 
-### Environment Variables (companion/.env)
+### Cloudflare Tunnel
 
-| Variable | Description |
-|----------|-------------|
-| `CLOUDFLARE_TUNNEL_TOKEN` | Optional: Cloudflare Tunnel token for remote access |
+Install cloudflared natively on the host:
+
+```bash
+sudo cloudflared service install <TUNNEL_TOKEN>
+```
+
+Get the token from [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → Networks → Tunnels.
 
 ## Ports
 
@@ -119,26 +99,10 @@ Repository:
 
 ## How Updates Work
 
-1. Dashboard checks GitHub for latest Companion release
-2. Click "Update Now" to:
-   - Pull latest `ghcr.io/bitfocus/companion/companion:latest`
-   - Rebuild your custom image
-   - Restart Companion container
-3. Your data in `/opt/companion` is preserved
+1. Run `sudo companion-update` on the host, or
+2. Use the Update Dashboard at port 8081 to check for updates and apply them
 
-## Included Features
-
-### Companion Container
-- **mDNS/Avahi**: Device discovery on local network
-- **Cloudflare Tunnel**: Optional remote access without port forwarding
-- **USB passthrough**: Stream Deck and other controllers
-- **Timezone**: Configurable (default: Europe/Bratislava)
-
-### Update Dashboard
-- Version comparison (current vs latest)
-- Live update progress via Server-Sent Events
-- Rate limiting (5-minute cooldown)
-- Container health monitoring
+Configuration is preserved across updates.
 
 ## Troubleshooting
 
@@ -147,25 +111,33 @@ Repository:
 # Check that hidraw devices exist
 ls -la /dev/hidraw*
 # Verify udev rules are installed
-ls -la /etc/udev/rules.d/50-elgato.rules
-# Verify the container is running in privileged mode
-docker inspect companion --format='{{.HostConfig.Privileged}}'
+ls -la /etc/udev/rules.d/50-companion.rules
+# Check Companion service logs
+sudo journalctl -u companion --no-pager -n 50 | grep -i stream
+# Restart Companion service
+sudo systemctl restart companion
 ```
 
-### Container won't start
+### Companion won't start
 ```bash
-# Check logs
-docker logs companion
+# Check service status
+sudo systemctl status companion
+# Check full logs
+sudo journalctl -u companion --no-pager -n 100
+```
+
+### Cloudflare tunnel not working
+```bash
+# Check tunnel service
+sudo systemctl status cloudflared
+# Check tunnel logs
+sudo journalctl -u cloudflared --no-pager -n 50
+```
+
+### Update Dashboard issues
+```bash
+# Check Docker logs
 docker logs companion-updater
-```
-
-### Update fails
-```bash
-# Manual update
-cd /opt/companion-docker
-docker compose pull
-docker compose build --no-cache
-docker compose up -d
 ```
 
 ## License
