@@ -3,8 +3,7 @@
 
 use axum::{
     body::Body,
-    extract::Path,
-    http::{header, HeaderValue, StatusCode},
+    http::{header, HeaderValue, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 use include_dir::{include_dir, Dir};
@@ -15,8 +14,10 @@ pub async fn index() -> Response {
     serve("index.html").await
 }
 
-pub async fn asset(Path(path): Path<String>) -> Response {
-    serve(&path).await
+pub async fn asset(uri: Uri) -> Response {
+    // Strip leading slash from the request path so it matches dist file names.
+    let path = uri.path().trim_start_matches('/');
+    serve(path).await
 }
 
 async fn serve(path: &str) -> Response {

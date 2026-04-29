@@ -65,10 +65,10 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(static_files::index))
-        .route("/assets/*path", get(static_files::asset))
         .route("/api/status", get(status_handler))
         .route("/api/update/stream", get(update_stream_handler))
         .route("/healthz", get(|| async { "ok" }))
+        .fallback(get(static_files::asset))
         .with_state(state);
 
     let addr: SocketAddr = "0.0.0.0:8081".parse().unwrap();

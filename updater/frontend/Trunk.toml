@@ -1,0 +1,6 @@
+[build]
+# Disable Subresource Integrity attributes on emitted preload links.
+# Chromium emits a console warning for `integrity` on preload destinations
+# that don't support SRI (see crbug.com/981419). Disabling SRI keeps the
+# console clean.
+no_sri = true
