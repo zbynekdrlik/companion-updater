@@ -21,3 +21,6 @@ venv/
 
 # Logs
 *.log
+
+# Playwright MCP local cache
+.playwright-mcp/
