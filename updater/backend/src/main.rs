@@ -1,6 +1,9 @@
 #[allow(dead_code)]
 mod version;
 
+#[allow(dead_code)]
+mod bitfocus;
+
 use axum::{routing::get, Router};
 use std::net::SocketAddr;
 
