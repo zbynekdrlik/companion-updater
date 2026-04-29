@@ -1,3 +1,6 @@
+#[allow(dead_code)]
+mod version;
+
 use axum::{routing::get, Router};
 use std::net::SocketAddr;
 
