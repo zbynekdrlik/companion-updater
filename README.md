@@ -6,7 +6,7 @@ Production setup for [Bitfocus Companion](https://bitfocus.io/companion) with US
 
 - **Companion**: Native systemd service via [companion-pi](https://github.com/bitfocus/companion-pi) — direct USB/udev access for reliable Stream Deck hot-plug detection
 - **Cloudflare Tunnel**: Native systemd service for remote access without port forwarding
-- **Update Dashboard**: Docker container for checking and applying Companion updates
+- **Update Dashboard**: Native Rust binary (axum + Leptos/WASM) for checking and applying Companion updates
 - **Persistent Data**: Configuration stored at `~companion/.config/companion-nodejs/`
 
 ## Quick Start
@@ -19,15 +19,17 @@ curl https://raw.githubusercontent.com/bitfocus/companion-pi/main/install.sh | s
 
 This installs Companion as a systemd service with USB support, udev rules, and auto-start on boot.
 
-### 2. Install Update Dashboard (Docker)
+### 2. Install Update Dashboard (native Rust binary)
 
-```bash
-sudo mkdir -p /opt/companion-updater
-sudo chown $USER:$USER /opt/companion-updater
-cp -r updater/* /opt/companion-updater/
-cd /opt/companion-updater
-docker compose up -d --build
-```
+Built from `updater/` and deployed via `deploy.sh` as a systemd service:
+
+- Binary: `/usr/local/bin/companion-updater`
+- Service: `systemctl status companion-updater`
+- Port: 8081
+
+The updater reads `/opt/companion/package.json` for the current version,
+fetches the latest stable from the Bitfocus builds API, and runs
+`update.sh stable` when triggered.
 
 ### 3. Access
 
@@ -50,7 +52,7 @@ The deploy script:
 1. Installs udev rules from `host/` to `/etc/udev/rules.d/`
 2. Updates Companion via `companion-update`
 3. Restarts the Companion systemd service
-4. Updates the companion-updater Docker container
+4. Builds the `companion-updater` Rust binary locally and installs it as a systemd service
 5. Waits for health checks to pass
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
@@ -64,11 +66,12 @@ Repository:
 │   ├── docker-compose.yml
 │   ├── entrypoint.sh
 │   └── .env.example
-├── updater/             # Update Dashboard (Docker)
-│   ├── Dockerfile
-│   ├── docker-compose.yml
-│   ├── requirements.txt
-│   └── app/
+├── updater/             # Rust + WASM updater
+│   ├── Cargo.toml       # workspace
+│   ├── backend/         # axum HTTP/SSE server
+│   ├── frontend/        # Leptos WASM dashboard
+│   ├── companion-updater.service
+│   └── build.sh
 ├── host/                # Udev rules for the target host
 │   ├── 50-elgato.rules
 │   └── 99-nldevicessetup.rules
@@ -136,8 +139,10 @@ sudo journalctl -u cloudflared --no-pager -n 50
 
 ### Update Dashboard issues
 ```bash
-# Check Docker logs
-docker logs companion-updater
+# Check service status
+sudo systemctl status companion-updater
+# Check full logs
+sudo journalctl -u companion-updater -n 100
 ```
 
 ## License
