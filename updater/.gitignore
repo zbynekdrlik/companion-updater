@@ -1,0 +1,4 @@
+target/
+frontend/dist/
+**/*.rs.bk
+Cargo.lock
