@@ -1,0 +1,15 @@
+[Unit]
+Description=Bitfocus Companion Update Dashboard
+After=network-online.target companion.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/companion-updater
+Restart=on-failure
+RestartSec=10
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
