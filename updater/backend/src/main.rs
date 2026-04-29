@@ -10,6 +10,9 @@ mod companion;
 #[allow(dead_code)]
 mod update;
 
+#[allow(dead_code)]
+mod static_files;
+
 use axum::{routing::get, Router};
 use std::net::SocketAddr;
 
