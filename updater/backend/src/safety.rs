@@ -311,14 +311,16 @@ pub async fn import_companionconfig(
     Ok(())
 }
 
-/// Wait until Companion's `/api/version` endpoint returns 2xx, polling every
+/// Wait until Companion's `/healthz` endpoint returns 2xx, polling every
 /// 2 seconds for up to `timeout`.
 pub async fn wait_until_healthy(
     client: &reqwest::Client,
     timeout: std::time::Duration,
 ) -> Result<(), String> {
     let start = std::time::Instant::now();
-    let url = format!("{COMPANION_BASE}/api/version");
+    // Companion exposes `/healthz` as its readiness probe (200 once the HTTP
+    // server is up). It does NOT expose `/api/version`.
+    let url = format!("{COMPANION_BASE}/healthz");
     while start.elapsed() < timeout {
         match client
             .get(&url)
