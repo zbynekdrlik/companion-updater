@@ -1,0 +1,12 @@
+[Unit]
+Description=Push Companion backup to GitHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+EnvironmentFile=/etc/default/companion-backup-push
+ExecStart=/usr/local/bin/companion-backup-push.sh
+StandardOutput=journal
+StandardError=journal

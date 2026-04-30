@@ -10,6 +10,8 @@ ExecStart=/usr/local/bin/companion-updater
 Restart=on-failure
 RestartSec=10
 Environment=RUST_LOG=info
+StateDirectory=companion-updater
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

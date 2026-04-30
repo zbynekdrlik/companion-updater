@@ -50,21 +50,64 @@ done
 remote "sudo udevadm control --reload-rules && sudo udevadm trigger"
 echo "  Udev rules reloaded."
 
-# Step 3: Update Companion via companion-update
-echo "[3/7] Updating Companion..."
-if remote "command -v companion-update >/dev/null 2>&1"; then
-  remote "sudo bash /usr/local/src/companionpi/update.sh stable"
-  echo "  Companion updated."
+# Step 3: Install backup pusher (script + systemd units; deploy key set up separately)
+echo "[3/7] Installing backup pusher..."
+remote_copy "${SCRIPT_DIR}/host/companion-backup-push.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-backup-push.sh"
+remote "sudo install -m 0755 /tmp/companion-backup-push.sh /usr/local/bin/companion-backup-push.sh && rm /tmp/companion-backup-push.sh"
+remote_copy "${SCRIPT_DIR}/host/companion-backup-push.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-backup-push.service"
+remote "sudo install -m 0644 /tmp/companion-backup-push.service /etc/systemd/system/companion-backup-push.service && rm /tmp/companion-backup-push.service"
+remote_copy "${SCRIPT_DIR}/host/companion-backup-push.timer" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-backup-push.timer"
+remote "sudo install -m 0644 /tmp/companion-backup-push.timer /etc/systemd/system/companion-backup-push.timer && rm /tmp/companion-backup-push.timer"
+remote_copy "${SCRIPT_DIR}/host/setup-backup-key.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/setup-backup-key.sh"
+remote "sudo install -m 0755 /tmp/setup-backup-key.sh /usr/local/sbin/setup-backup-key.sh && rm /tmp/setup-backup-key.sh"
+remote "sudo systemctl daemon-reload"
+# Enable timer only if /etc/default/companion-backup-push exists (i.e., setup-backup-key.sh has been run).
+if remote "test -f /etc/default/companion-backup-push"; then
+  remote "sudo systemctl enable --now companion-backup-push.timer"
+  echo "  Backup pusher enabled."
 else
-  echo "  companion-update not found — companion-pi may not be installed."
-  echo "  Install with: curl https://raw.githubusercontent.com/bitfocus/companion-pi/main/install.sh | sudo bash"
-  exit 1
+  echo "  Backup pusher installed but NOT yet enabled."
+  echo "  Run on the host:    sudo /usr/local/sbin/setup-backup-key.sh"
+  echo "  Then re-run this deploy or:  sudo systemctl enable --now companion-backup-push.timer"
 fi
 
-# Step 4: Restart Companion service
-echo "[4/7] Restarting Companion service..."
-remote "sudo systemctl restart companion"
-echo "  Companion service restarted."
+# Step 4: Update Companion through the safety-gated updater endpoint.
+#
+# This step talks to the companion-updater currently running on the host. On
+# the very first deploy of this PR the running binary is the OLD one without
+# safety hooks — its /api/update/stream still emits "type":"complete" on
+# success but no safety_pre/safety_post. The new binary deployed in step 6
+# will emit the full safety event sequence on the next run. There's no clean
+# way to swap binaries before the upgrade without dropping the cooldown
+# state, so we accept that the first run uses the old code path.
+echo "[4/7] Updating Companion via companion-updater (safety-gated)..."
+# Stream the SSE update endpoint. We grep for the first terminal event in the
+# stream: complete = success, safety_rollback = data loss + auto-reverted,
+# error = anything else. The first match wins; we then stop reading.
+#
+# `|| true` swallows the pipeline's exit code: an empty TERMINAL_LINE (curl
+# failure, no terminal event seen, etc.) falls through to the *) case below
+# which prints a clear error. Set -e would otherwise abort the deploy with
+# no diagnostic.
+TERMINAL_LINE="$(remote "curl -fsS --no-buffer --max-time 1800 -H 'Accept: text/event-stream' http://127.0.0.1:8081/api/update/stream 2>&1 | grep -m1 -E '\"type\":\"(complete|error|safety_rollback)\"'" || true)"
+echo "  ${TERMINAL_LINE}"
+case "${TERMINAL_LINE}" in
+  *'"type":"complete"'*)
+    echo "  Companion updated successfully."
+    ;;
+  *'"type":"safety_rollback"'*)
+    echo "  ERROR: data loss detected during upgrade; updater rolled back."
+    exit 1
+    ;;
+  *'"type":"error"'*)
+    echo "  ERROR: upgrade failed (see updater journal: sudo journalctl -u companion-updater -n 100)."
+    exit 1
+    ;;
+  *)
+    echo "  ERROR: did not receive a terminal event from updater."
+    exit 1
+    ;;
+esac
 
 # Step 5: Build companion-updater binary locally
 echo "[5/7] Building companion-updater..."

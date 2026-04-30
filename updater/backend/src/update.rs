@@ -5,7 +5,6 @@
 //! restarts the companion service.
 
 use std::process::Stdio;
-use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -14,38 +13,247 @@ use tokio::sync::mpsc;
 const UPDATE_SCRIPT: &str = "/usr/local/src/companionpi/update.sh";
 
 #[derive(Clone, Debug, serde::Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpdateEvent {
-    Progress { message: String },
-    Complete { message: String },
-    Error { message: String },
+    Progress {
+        message: String,
+    },
+    Complete {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<crate::safety::Counts>,
+    },
+    Error {
+        message: String,
+    },
+    SafetyPre {
+        counts: crate::safety::Counts,
+    },
+    SafetyPost {
+        counts: crate::safety::Counts,
+    },
+    SafetyRollback {
+        message: String,
+        lost: crate::safety::Counts,
+    },
 }
 
-/// Spawn the update process and stream lines through `tx`.
-/// Closes `tx` when finished.
+/// Spawn the update process and stream events through `tx`.
+///
+/// Wraps the existing update.sh + systemctl restart flow with a safety gate:
+///   1. Pre-upgrade: fetch full export, parse counts, archive, emit SafetyPre.
+///   2. Run update.sh stable.
+///   3. systemctl restart companion; wait for healthy.
+///   4. Post-upgrade: fetch full export, parse counts, emit SafetyPost.
+///   5. If any count decreased: import the pre-upgrade snapshot, restart again,
+///      emit SafetyRollback. Otherwise emit Complete with diff.
 pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Starting update (stable channel)...".into(),
-        })
-        .await;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .expect("reqwest client");
 
-    let mut child = match Command::new("sudo")
+    // 1. Pre-upgrade snapshot.
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Taking pre-upgrade snapshot...".into(),
+    }).await;
+
+    let pre_bytes = match crate::safety::fetch_export(&http).await {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("pre-upgrade snapshot failed: {e}"),
+            }).await;
+            return;
+        }
+    };
+    let pre_counts = match crate::safety::count_from_companionconfig(&pre_bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("pre-upgrade parse failed: {e}"),
+            }).await;
+            return;
+        }
+    };
+    if let Err(e) = save_snapshot(&pre_bytes).await {
+        let _ = tx.send(UpdateEvent::Error {
+            message: format!("could not persist pre-upgrade snapshot: {e}"),
+        }).await;
+        return;
+    }
+    let _ = tx.send(UpdateEvent::SafetyPre { counts: pre_counts }).await;
+
+    // 2. Run update.sh stable.
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Starting update (stable channel)...".into(),
+    }).await;
+    if let Err(e) = run_update_script(&tx).await {
+        let _ = tx.send(UpdateEvent::Error { message: e }).await;
+        return;
+    }
+
+    // 3. Restart Companion + wait for healthy.
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Restarting companion service...".into(),
+    }).await;
+    match Command::new("sudo")
+        .args(["systemctl", "restart", "companion"])
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("systemctl restart exited with {s}"),
+            }).await;
+            return;
+        }
+        Err(e) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("systemctl restart failed: {e}"),
+            }).await;
+            return;
+        }
+    }
+    if let Err(e) =
+        crate::safety::wait_until_healthy(&http, std::time::Duration::from_secs(60)).await
+    {
+        let _ = tx.send(UpdateEvent::Error {
+            message: format!("Companion did not return to healthy: {e}"),
+        }).await;
+        return;
+    }
+
+    // 4. Post-upgrade snapshot.
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Taking post-upgrade snapshot...".into(),
+    }).await;
+    let post_bytes = match crate::safety::fetch_export(&http).await {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("post-upgrade snapshot failed: {e}"),
+            }).await;
+            return;
+        }
+    };
+    let post_counts = match crate::safety::count_from_companionconfig(&post_bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("post-upgrade parse failed: {e}"),
+            }).await;
+            return;
+        }
+    };
+    let _ = tx.send(UpdateEvent::SafetyPost { counts: post_counts }).await;
+
+    // 5. Compare; rollback if any decrease.
+    if pre_counts.any_decreased(&post_counts) {
+        let lost = pre_counts.lost(&post_counts);
+        let _ = tx.send(UpdateEvent::Progress {
+            message: format!(
+                "Data loss detected (lost {} connections, {} buttons, {} triggers). Rolling back...",
+                lost.connections, lost.buttons, lost.triggers
+            ),
+        }).await;
+
+        if let Err(e) = crate::safety::import_companionconfig(pre_bytes).await {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("rollback import failed: {e}"),
+            }).await;
+            return;
+        }
+        if let Err(e) =
+            crate::safety::wait_until_healthy(&http, std::time::Duration::from_secs(60)).await
+        {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("Companion did not return to healthy after rollback: {e}"),
+            }).await;
+            return;
+        }
+        let _ = tx.send(UpdateEvent::SafetyRollback {
+            message: "Data loss detected; rolled back to pre-upgrade state.".into(),
+            lost,
+        }).await;
+        return;
+    }
+
+    // 6. Success.
+    let new_version = crate::companion::read_installed_version()
+        .await
+        .unwrap_or_else(|_| "unknown".into());
+    let diff = crate::safety::Counts {
+        connections: post_counts.connections.saturating_sub(pre_counts.connections),
+        pages_with_content: post_counts
+            .pages_with_content
+            .saturating_sub(pre_counts.pages_with_content),
+        buttons: post_counts.buttons.saturating_sub(pre_counts.buttons),
+        triggers: post_counts.triggers.saturating_sub(pre_counts.triggers),
+    };
+    let _ = tx.send(UpdateEvent::Complete {
+        message: format!(
+            "Update complete. Now running {}",
+            crate::version::format(&new_version)
+        ),
+        diff: Some(diff),
+    }).await;
+}
+
+async fn save_snapshot(bytes: &[u8]) -> Result<(), String> {
+    let state_dir = std::env::var("STATE_DIRECTORY")
+        .unwrap_or_else(|_| "/var/lib/companion-updater".to_string());
+    tokio::fs::create_dir_all(&state_dir)
+        .await
+        .map_err(|e| format!("create state dir: {e}"))?;
+    let path = format!("{state_dir}/pre-upgrade.companionconfig");
+    tokio::fs::write(&path, bytes)
+        .await
+        .map_err(|e| format!("write {path}: {e}"))?;
+
+    let archive_dir = format!("{state_dir}/pre-upgrade-archive");
+    tokio::fs::create_dir_all(&archive_dir)
+        .await
+        .map_err(|e| format!("create archive dir: {e}"))?;
+    // Microsecond suffix avoids a collision if two archives ever land in the
+    // same second (the 5-minute cooldown makes this practically impossible,
+    // but the suffix is free insurance).
+    let ts = chrono::Local::now().format("%Y%m%dT%H%M%S%6f").to_string();
+    let archived = format!("{archive_dir}/{ts}.companionconfig");
+    tokio::fs::write(&archived, bytes)
+        .await
+        .map_err(|e| format!("write {archived}: {e}"))?;
+    prune_archive(&archive_dir).await;
+    Ok(())
+}
+
+async fn prune_archive(dir: &str) {
+    let now = std::time::SystemTime::now();
+    let cutoff = now - std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    let mut rd = match tokio::fs::read_dir(dir).await {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let meta = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let modified = meta.modified().unwrap_or(now);
+        if modified < cutoff {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
+async fn run_update_script(tx: &mpsc::Sender<UpdateEvent>) -> Result<(), String> {
+    let mut child = Command::new("sudo")
         .args(["bash", UPDATE_SCRIPT, "stable"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("Failed to spawn update.sh: {e}"),
-                })
-                .await;
-            return;
-        }
-    };
+        .map_err(|e| format!("Failed to spawn update.sh: {e}"))?;
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
@@ -58,7 +266,6 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
             let _ = tx_out.send(UpdateEvent::Progress { message: line }).await;
         }
     });
-
     let tx_err = tx.clone();
     let stderr_handle = tokio::spawn(async move {
         let reader = BufReader::new(stderr);
@@ -68,106 +275,85 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
         }
     });
 
-    let status = match child.wait().await {
-        Ok(s) => s,
-        Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("update.sh wait failed: {e}"),
-                })
-                .await;
-            return;
-        }
-    };
-
+    let status = child.wait().await.map_err(|e| format!("update.sh wait failed: {e}"))?;
     let _ = stdout_handle.await;
     let _ = stderr_handle.await;
-
     if !status.success() {
-        let _ = tx
-            .send(UpdateEvent::Error {
-                message: format!("update.sh exited with {status}"),
-            })
-            .await;
-        return;
+        return Err(format!("update.sh exited with {status}"));
     }
-
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Restarting companion service...".into(),
-        })
-        .await;
-
-    let restart = Command::new("sudo")
-        .args(["systemctl", "restart", "companion"])
-        .status()
-        .await;
-
-    match restart {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("systemctl restart exited with {s}"),
-                })
-                .await;
-            return;
-        }
-        Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("systemctl restart failed: {e}"),
-                })
-                .await;
-            return;
-        }
-    }
-
-    // Allow Companion a moment to come up, then read the new version.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    let new_version = crate::companion::read_installed_version()
-        .await
-        .unwrap_or_else(|_| "unknown".to_string());
-
-    let _ = tx
-        .send(UpdateEvent::Complete {
-            message: format!(
-                "Update complete. Now running {}",
-                crate::version::format(&new_version)
-            ),
-        })
-        .await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safety::Counts;
 
     #[test]
     fn event_progress_serializes() {
-        let e = UpdateEvent::Progress {
-            message: "hello".into(),
-        };
-        let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"type":"progress","message":"hello"}"#);
+        let e = UpdateEvent::Progress { message: "hello".into() };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"progress","message":"hello"}"#
+        );
     }
 
     #[test]
-    fn event_complete_serializes() {
+    fn event_complete_no_diff_serializes_compatibly() {
+        let e = UpdateEvent::Complete { message: "done".into(), diff: None };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"complete","message":"done"}"#
+        );
+    }
+
+    #[test]
+    fn event_complete_with_diff_serializes() {
         let e = UpdateEvent::Complete {
             message: "done".into(),
+            diff: Some(Counts { connections: 0, pages_with_content: 0, buttons: 0, triggers: 0 }),
         };
-        let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"type":"complete","message":"done"}"#);
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"complete","message":"done","diff":{"connections":0,"pages_with_content":0,"buttons":0,"triggers":0}}"#
+        );
     }
 
     #[test]
     fn event_error_serializes() {
-        let e = UpdateEvent::Error {
-            message: "boom".into(),
+        let e = UpdateEvent::Error { message: "boom".into() };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"error","message":"boom"}"#
+        );
+    }
+
+    #[test]
+    fn event_safety_pre_serializes_with_snake_case_tag() {
+        let e = UpdateEvent::SafetyPre {
+            counts: Counts { connections: 41, pages_with_content: 20, buttons: 250, triggers: 47 },
         };
         let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"type":"error","message":"boom"}"#);
+        assert!(s.starts_with(r#"{"type":"safety_pre","counts":"#), "got {s}");
+    }
+
+    #[test]
+    fn event_safety_post_serializes_with_snake_case_tag() {
+        let e = UpdateEvent::SafetyPost {
+            counts: Counts::default(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.starts_with(r#"{"type":"safety_post","counts":"#), "got {s}");
+    }
+
+    #[test]
+    fn event_safety_rollback_includes_lost_counts() {
+        let e = UpdateEvent::SafetyRollback {
+            message: "rolled back".into(),
+            lost: Counts { connections: 0, pages_with_content: 0, buttons: 5, triggers: 0 },
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""type":"safety_rollback""#), "got {s}");
+        assert!(s.contains(r#""buttons":5"#), "got {s}");
     }
 }
