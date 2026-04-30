@@ -14,11 +14,32 @@ use tokio::sync::mpsc;
 const UPDATE_SCRIPT: &str = "/usr/local/src/companionpi/update.sh";
 
 #[derive(Clone, Debug, serde::Serialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum UpdateEvent {
-    Progress { message: String },
-    Complete { message: String },
-    Error { message: String },
+    Progress {
+        message: String,
+    },
+    Complete {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diff: Option<crate::safety::Counts>,
+    },
+    Error {
+        message: String,
+    },
+    #[allow(dead_code)]
+    SafetyPre {
+        counts: crate::safety::Counts,
+    },
+    #[allow(dead_code)]
+    SafetyPost {
+        counts: crate::safety::Counts,
+    },
+    #[allow(dead_code)]
+    SafetyRollback {
+        message: String,
+        lost: crate::safety::Counts,
+    },
 }
 
 /// Spawn the update process and stream lines through `tx`.
@@ -136,6 +157,7 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
                 "Update complete. Now running {}",
                 crate::version::format(&new_version)
             ),
+            diff: None,
         })
         .await;
 }
@@ -143,31 +165,73 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::safety::Counts;
 
     #[test]
     fn event_progress_serializes() {
-        let e = UpdateEvent::Progress {
-            message: "hello".into(),
-        };
-        let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"type":"progress","message":"hello"}"#);
+        let e = UpdateEvent::Progress { message: "hello".into() };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"progress","message":"hello"}"#
+        );
     }
 
     #[test]
-    fn event_complete_serializes() {
+    fn event_complete_no_diff_serializes_compatibly() {
+        let e = UpdateEvent::Complete { message: "done".into(), diff: None };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"complete","message":"done"}"#
+        );
+    }
+
+    #[test]
+    fn event_complete_with_diff_serializes() {
         let e = UpdateEvent::Complete {
             message: "done".into(),
+            diff: Some(Counts { connections: 0, pages_with_content: 0, buttons: 0, triggers: 0 }),
         };
-        let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"type":"complete","message":"done"}"#);
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"complete","message":"done","diff":{"connections":0,"pages_with_content":0,"buttons":0,"triggers":0}}"#
+        );
     }
 
     #[test]
     fn event_error_serializes() {
-        let e = UpdateEvent::Error {
-            message: "boom".into(),
+        let e = UpdateEvent::Error { message: "boom".into() };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"type":"error","message":"boom"}"#
+        );
+    }
+
+    #[test]
+    fn event_safety_pre_serializes_with_snake_case_tag() {
+        let e = UpdateEvent::SafetyPre {
+            counts: Counts { connections: 41, pages_with_content: 20, buttons: 250, triggers: 47 },
         };
         let s = serde_json::to_string(&e).unwrap();
-        assert_eq!(s, r#"{"type":"error","message":"boom"}"#);
+        assert!(s.starts_with(r#"{"type":"safety_pre","counts":"#), "got {s}");
+    }
+
+    #[test]
+    fn event_safety_post_serializes_with_snake_case_tag() {
+        let e = UpdateEvent::SafetyPost {
+            counts: Counts::default(),
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.starts_with(r#"{"type":"safety_post","counts":"#), "got {s}");
+    }
+
+    #[test]
+    fn event_safety_rollback_includes_lost_counts() {
+        let e = UpdateEvent::SafetyRollback {
+            message: "rolled back".into(),
+            lost: Counts { connections: 0, pages_with_content: 0, buttons: 5, triggers: 0 },
+        };
+        let s = serde_json::to_string(&e).unwrap();
+        assert!(s.contains(r#""type":"safety_rollback""#), "got {s}");
+        assert!(s.contains(r#""buttons":5"#), "got {s}");
     }
 }

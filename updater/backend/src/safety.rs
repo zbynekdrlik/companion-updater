@@ -18,6 +18,7 @@ pub struct Counts {
 
 impl Counts {
     /// `true` if any field in `post` is strictly less than the same field in `self`.
+    #[allow(dead_code)]
     pub fn any_decreased(&self, post: &Counts) -> bool {
         post.connections < self.connections
             || post.pages_with_content < self.pages_with_content
@@ -27,6 +28,7 @@ impl Counts {
 
     /// Per-field difference: `self - post` (i.e., how many were lost).
     /// Negative deltas (gains) are clamped to 0.
+    #[allow(dead_code)]
     pub fn lost(&self, post: &Counts) -> Counts {
         Counts {
             connections: self.connections.saturating_sub(post.connections),
@@ -48,6 +50,7 @@ impl Counts {
 ///
 /// Each page entry contains a `controls` map (row -> col -> bank id). A page
 /// "has content" if `controls` has at least one row with at least one column.
+#[allow(dead_code)]
 pub fn count_from_json(json: &[u8]) -> Result<Counts, String> {
     let v: serde_json::Value =
         serde_json::from_slice(json).map_err(|e| format!("parse companionconfig: {e}"))?;
@@ -74,6 +77,7 @@ pub fn count_from_json(json: &[u8]) -> Result<Counts, String> {
     })
 }
 
+#[allow(dead_code)]
 fn count_pages(v: &serde_json::Value) -> (usize, usize) {
     let pages = match v.get("pages") {
         Some(p) => p,
@@ -109,18 +113,22 @@ fn count_pages(v: &serde_json::Value) -> (usize, usize) {
 }
 
 /// Local URL of the running Companion admin server.
+#[allow(dead_code)]
 const COMPANION_BASE: &str = "http://127.0.0.1:8000";
 
 /// Companion tRPC WebSocket endpoint (same host/port as the HTTP admin server,
 /// just upgraded to WS at the `/trpc` path).
+#[allow(dead_code)]
 const COMPANION_TRPC_WS: &str = "ws://127.0.0.1:8000/trpc";
 
 /// Maximum size of a single base64 upload chunk (raw bytes, before encoding).
 /// 64 KiB matches what the official UI uses and stays well under any tRPC
 /// message-size limits.
+#[allow(dead_code)]
 const IMPORT_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Fetch a full Companion export as JSON bytes.
+#[allow(dead_code)]
 pub async fn fetch_export(client: &reqwest::Client) -> Result<Vec<u8>, String> {
     let url = format!("{COMPANION_BASE}/int/export/full");
     let resp = client
@@ -155,6 +163,7 @@ pub async fn fetch_export(client: &reqwest::Client) -> Result<Vec<u8>, String> {
 ///
 /// The `client` parameter is unused in this body (kept for API symmetry with
 /// `fetch_export`); the WebSocket is opened directly with `tokio-tungstenite`.
+#[allow(dead_code)]
 pub async fn import_companionconfig(
     _client: &reqwest::Client,
     bytes: Vec<u8>,
@@ -294,6 +303,7 @@ pub async fn import_companionconfig(
 
 /// Wait until Companion's `/api/version` endpoint returns 2xx, polling every
 /// 2 seconds for up to `timeout`.
+#[allow(dead_code)]
 pub async fn wait_until_healthy(
     client: &reqwest::Client,
     timeout: std::time::Duration,
