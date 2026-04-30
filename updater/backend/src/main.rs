@@ -1,5 +1,7 @@
 mod bitfocus;
 mod companion;
+#[allow(dead_code)]
+mod safety;
 mod static_files;
 mod update;
 mod version;
