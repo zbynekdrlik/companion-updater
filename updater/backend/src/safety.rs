@@ -41,10 +41,10 @@ impl Counts {
 
 /// Parse a Companion `.companionconfig` byte stream and compute `Counts`.
 ///
-/// `.companionconfig` files (and the bytes returned by `/int/export/full`) are
-/// gzip-compressed JSON; raw JSON is also accepted for tests and for callers
-/// that have already decompressed. The format is auto-detected from the
-/// gzip magic bytes (`1f 8b`).
+/// Accepts either gzip-compressed JSON (as produced by `/int/export/full` and
+/// by Companion's hourly backups) or raw JSON (for tests and for callers that
+/// have already decompressed). The format is auto-detected from the gzip
+/// magic bytes (`1f 8b`).
 ///
 /// Schema (Companion v4.3, observed in real exports):
 ///   { "instances": { ... },                 // map of connection id -> spec
@@ -53,7 +53,7 @@ impl Counts {
 ///
 /// Each page entry contains a `controls` map (row -> col -> bank id). A page
 /// "has content" if `controls` has at least one row with at least one column.
-pub fn count_from_json(json: &[u8]) -> Result<Counts, String> {
+pub fn count_from_companionconfig(json: &[u8]) -> Result<Counts, String> {
     let owned;
     let bytes: &[u8] = if json.len() >= 2 && json[0] == 0x1f && json[1] == 0x8b {
         use std::io::Read as _;
@@ -139,7 +139,13 @@ const COMPANION_TRPC_WS: &str = "ws://127.0.0.1:8000/trpc";
 /// message-size limits.
 const IMPORT_CHUNK_BYTES: usize = 64 * 1024;
 
-/// Fetch a full Companion export as JSON bytes.
+/// Fetch a full Companion export.
+///
+/// Returns the raw response body — gzip-compressed JSON, as produced by
+/// Companion's `/int/export/full`. The bytes are usable directly:
+/// - `count_from_companionconfig` decompresses transparently.
+/// - `import_companionconfig` re-uploads them verbatim (round-trip preserves
+///   the on-disk format).
 pub async fn fetch_export(client: &reqwest::Client) -> Result<Vec<u8>, String> {
     let url = format!("{COMPANION_BASE}/int/export/full");
     let resp = client
@@ -171,13 +177,7 @@ pub async fn fetch_export(client: &reqwest::Client) -> Result<Vec<u8>, String> {
 /// Companion MUST be running and reachable on localhost:8000. There is no
 /// authentication. Re-importing the current export is a verified no-op
 /// (counts unchanged), which is what makes auto-rollback safe.
-///
-/// The `client` parameter is unused in this body (kept for API symmetry with
-/// `fetch_export`); the WebSocket is opened directly with `tokio-tungstenite`.
-pub async fn import_companionconfig(
-    _client: &reqwest::Client,
-    bytes: Vec<u8>,
-) -> Result<(), String> {
+pub async fn import_companionconfig(bytes: Vec<u8>) -> Result<(), String> {
     use base64::Engine as _;
     use futures::{SinkExt as _, StreamExt as _};
     use sha1::{Digest as _, Sha1};
@@ -285,7 +285,6 @@ pub async fn import_companionconfig(
     //    `connections` and `userconfig` only accept "unchanged" | "reset"
     //    (no "reset-and-import"); connections are re-created by the apply pass.
     let id = next_id;
-    let _ = next_id; // suppress unused after final increment
     call(
         &mut ws,
         id,
@@ -343,20 +342,20 @@ mod tests {
 
     #[test]
     fn empty_json_object_yields_zeros() {
-        let c = count_from_json(b"{}").unwrap();
+        let c = count_from_companionconfig(b"{}").unwrap();
         assert_eq!(c, Counts::default());
     }
 
     #[test]
     fn counts_connections_in_instances_map() {
         let json = br#"{"instances":{"a":{},"b":{},"c":{}}}"#;
-        assert_eq!(count_from_json(json).unwrap().connections, 3);
+        assert_eq!(count_from_companionconfig(json).unwrap().connections, 3);
     }
 
     #[test]
     fn counts_triggers_in_triggers_map() {
         let json = br#"{"triggers":{"t1":{},"t2":{}}}"#;
-        assert_eq!(count_from_json(json).unwrap().triggers, 2);
+        assert_eq!(count_from_companionconfig(json).unwrap().triggers, 2);
     }
 
     #[test]
@@ -366,7 +365,7 @@ mod tests {
             {"controls":{"0":{"0":"bank:d"}}},
             {"controls":{}}
         ]}"#;
-        let c = count_from_json(json).unwrap();
+        let c = count_from_companionconfig(json).unwrap();
         assert_eq!(c.buttons, 4);
         assert_eq!(c.pages_with_content, 2);
     }
@@ -374,7 +373,7 @@ mod tests {
     #[test]
     fn counts_buttons_in_pages_object() {
         let json = br#"{"pages":{"1":{"controls":{"0":{"0":"x"}}}}}"#;
-        let c = count_from_json(json).unwrap();
+        let c = count_from_companionconfig(json).unwrap();
         assert_eq!(c.buttons, 1);
         assert_eq!(c.pages_with_content, 1);
     }
@@ -382,20 +381,20 @@ mod tests {
     #[test]
     fn empty_pages_dont_count() {
         let json = br#"{"pages":[{"controls":{}},{"controls":{"0":{}}}]}"#;
-        let c = count_from_json(json).unwrap();
+        let c = count_from_companionconfig(json).unwrap();
         assert_eq!(c.buttons, 0);
         assert_eq!(c.pages_with_content, 0);
     }
 
     #[test]
     fn invalid_json_errors() {
-        assert!(count_from_json(b"not json").is_err());
+        assert!(count_from_companionconfig(b"not json").is_err());
     }
 
     #[test]
     fn counts_from_gzipped_companionconfig() {
         // `/int/export/full` returns gzip-compressed JSON without setting
-        // `Content-Encoding: gzip`, so `count_from_json` must transparently
+        // `Content-Encoding: gzip`, so `count_from_companionconfig` must transparently
         // decompress when it sees the gzip magic bytes.
         use flate2::{write::GzEncoder, Compression};
         use std::io::Write as _;
@@ -405,7 +404,7 @@ mod tests {
         let gzipped = enc.finish().unwrap();
         // Sanity: gzip magic present.
         assert_eq!(&gzipped[..2], &[0x1f, 0x8b]);
-        let c = count_from_json(&gzipped).unwrap();
+        let c = count_from_companionconfig(&gzipped).unwrap();
         assert_eq!(c.connections, 2);
         assert_eq!(c.triggers, 1);
         assert_eq!(c.buttons, 2);

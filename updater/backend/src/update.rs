@@ -67,7 +67,7 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
             return;
         }
     };
-    let pre_counts = match crate::safety::count_from_json(&pre_bytes) {
+    let pre_counts = match crate::safety::count_from_companionconfig(&pre_bytes) {
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(UpdateEvent::Error {
@@ -138,7 +138,7 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
             return;
         }
     };
-    let post_counts = match crate::safety::count_from_json(&post_bytes) {
+    let post_counts = match crate::safety::count_from_companionconfig(&post_bytes) {
         Ok(c) => c,
         Err(e) => {
             let _ = tx.send(UpdateEvent::Error {
@@ -159,7 +159,7 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
             ),
         }).await;
 
-        if let Err(e) = crate::safety::import_companionconfig(&http, pre_bytes).await {
+        if let Err(e) = crate::safety::import_companionconfig(pre_bytes).await {
             let _ = tx.send(UpdateEvent::Error {
                 message: format!("rollback import failed: {e}"),
             }).await;
@@ -216,7 +216,10 @@ async fn save_snapshot(bytes: &[u8]) -> Result<(), String> {
     tokio::fs::create_dir_all(&archive_dir)
         .await
         .map_err(|e| format!("create archive dir: {e}"))?;
-    let ts = chrono::Local::now().format("%Y%m%dT%H%M%S").to_string();
+    // Microsecond suffix avoids a collision if two archives ever land in the
+    // same second (the 5-minute cooldown makes this practically impossible,
+    // but the suffix is free insurance).
+    let ts = chrono::Local::now().format("%Y%m%dT%H%M%S%6f").to_string();
     let archived = format!("{archive_dir}/{ts}.companionconfig");
     tokio::fs::write(&archived, bytes)
         .await

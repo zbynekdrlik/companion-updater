@@ -72,10 +72,23 @@ else
 fi
 
 # Step 4: Update Companion through the safety-gated updater endpoint.
+#
+# This step talks to the companion-updater currently running on the host. On
+# the very first deploy of this PR the running binary is the OLD one without
+# safety hooks — its /api/update/stream still emits "type":"complete" on
+# success but no safety_pre/safety_post. The new binary deployed in step 6
+# will emit the full safety event sequence on the next run. There's no clean
+# way to swap binaries before the upgrade without dropping the cooldown
+# state, so we accept that the first run uses the old code path.
 echo "[4/7] Updating Companion via companion-updater (safety-gated)..."
 # Stream the SSE update endpoint. We grep for the first terminal event in the
 # stream: complete = success, safety_rollback = data loss + auto-reverted,
 # error = anything else. The first match wins; we then stop reading.
+#
+# `|| true` swallows the pipeline's exit code: an empty TERMINAL_LINE (curl
+# failure, no terminal event seen, etc.) falls through to the *) case below
+# which prints a clear error. Set -e would otherwise abort the deploy with
+# no diagnostic.
 TERMINAL_LINE="$(remote "curl -fsS --no-buffer --max-time 1800 -H 'Accept: text/event-stream' http://127.0.0.1:8081/api/update/stream 2>&1 | grep -m1 -E '\"type\":\"(complete|error|safety_rollback)\"'" || true)"
 echo "  ${TERMINAL_LINE}"
 case "${TERMINAL_LINE}" in

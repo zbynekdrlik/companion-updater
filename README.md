@@ -187,6 +187,13 @@ on 2026-04-29.
 Pre-upgrade snapshots are kept at `/var/lib/companion-updater/pre-upgrade-archive/`
 for 7 days as an audit trail.
 
+**Known limitation:** the gate only catches count *decreases*. A migration
+that swaps button content while preserving the same count, or corrupts
+existing buttons in place, will not trigger a rollback. For that class of
+issue the off-machine GitHub backups are the recovery mechanism — import a
+known-good `.companionconfig` from `companion-snv/history/` (or
+`companion-pp/history/`) via the dashboard's Import / Export page.
+
 ## License
 
 MIT
