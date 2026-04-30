@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly Companion backup push
+
+[Timer]
+OnCalendar=*:01:00
+Persistent=true
+Unit=companion-backup-push.service
+
+[Install]
+WantedBy=timers.target
