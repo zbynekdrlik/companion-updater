@@ -108,6 +108,214 @@ fn count_pages(v: &serde_json::Value) -> (usize, usize) {
     (pages_with_content, buttons)
 }
 
+/// Local URL of the running Companion admin server.
+const COMPANION_BASE: &str = "http://127.0.0.1:8000";
+
+/// Companion tRPC WebSocket endpoint (same host/port as the HTTP admin server,
+/// just upgraded to WS at the `/trpc` path).
+const COMPANION_TRPC_WS: &str = "ws://127.0.0.1:8000/trpc";
+
+/// Maximum size of a single base64 upload chunk (raw bytes, before encoding).
+/// 64 KiB matches what the official UI uses and stays well under any tRPC
+/// message-size limits.
+const IMPORT_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Fetch a full Companion export as JSON bytes.
+pub async fn fetch_export(client: &reqwest::Client) -> Result<Vec<u8>, String> {
+    let url = format!("{COMPANION_BASE}/int/export/full");
+    let resp = client
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(60))
+        .send()
+        .await
+        .map_err(|e| format!("export request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("export endpoint returned {}", resp.status()));
+    }
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("read export body: {e}"))
+}
+
+/// Import a full Companion configuration from raw `.companionconfig` bytes
+/// (gzip-compressed JSON, as produced by `/int/export/full`).
+///
+/// This drives Companion's tRPC import flow over a WebSocket at
+/// `ws://127.0.0.1:8000/trpc`:
+///
+/// 1. `importExport.prepareImport.start` — register an upload session
+/// 2. `importExport.prepareImport.uploadChunk` — base64-chunked bytes
+/// 3. `importExport.prepareImport.complete` — SHA-1 checksum to commit
+/// 4. `importExport.importFull` — apply with a reset-and-import config
+///
+/// Companion MUST be running and reachable on localhost:8000. There is no
+/// authentication. Re-importing the current export is a verified no-op
+/// (counts unchanged), which is what makes auto-rollback safe.
+///
+/// The `client` parameter is unused in this body (kept for API symmetry with
+/// `fetch_export`); the WebSocket is opened directly with `tokio-tungstenite`.
+pub async fn import_companionconfig(
+    _client: &reqwest::Client,
+    bytes: Vec<u8>,
+) -> Result<(), String> {
+    use base64::Engine as _;
+    use futures::{SinkExt as _, StreamExt as _};
+    use sha1::{Digest as _, Sha1};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let total_size = bytes.len();
+    if total_size == 0 {
+        return Err("import: refusing to send empty .companionconfig".into());
+    }
+    let mut hasher = Sha1::new();
+    hasher.update(&bytes);
+    let sha1_hex = format!("{:x}", hasher.finalize());
+
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(COMPANION_TRPC_WS)
+        .await
+        .map_err(|e| format!("import: ws connect failed: {e}"))?;
+
+    let mut next_id: u64 = 1;
+    async fn call(
+        ws: &mut tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        id: u64,
+        path: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let msg = serde_json::json!({
+            "id": id,
+            "method": "mutation",
+            "params": { "path": path, "input": input },
+        });
+        ws.send(Message::Text(msg.to_string()))
+            .await
+            .map_err(|e| format!("import: ws send {path}: {e}"))?;
+        loop {
+            let next = ws
+                .next()
+                .await
+                .ok_or_else(|| format!("import: ws closed waiting for {path}"))?;
+            let frame = next.map_err(|e| format!("import: ws recv {path}: {e}"))?;
+            let txt = match frame {
+                Message::Text(t) => t,
+                Message::Binary(b) => String::from_utf8_lossy(&b).into_owned(),
+                Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => continue,
+                Message::Close(_) => return Err(format!("import: ws closed mid-call ({path})")),
+            };
+            let v: serde_json::Value = serde_json::from_str(&txt)
+                .map_err(|e| format!("import: bad json from {path}: {e}"))?;
+            if v.get("id").and_then(|x| x.as_u64()) != Some(id) {
+                continue;
+            }
+            if let Some(err) = v.get("error") {
+                return Err(format!("import: tRPC error on {path}: {err}"));
+            }
+            return Ok(v.get("result").cloned().unwrap_or(serde_json::Value::Null));
+        }
+    }
+
+    // 1. start
+    let id = next_id; next_id += 1;
+    let r = call(
+        &mut ws,
+        id,
+        "importExport.prepareImport.start",
+        serde_json::json!({ "name": "rollback.companionconfig", "size": total_size }),
+    ).await?;
+    let session_id = r
+        .pointer("/data")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| format!("import: start returned no sessionId: {r}"))?
+        .to_string();
+
+    // 2. upload chunks
+    let mut offset = 0usize;
+    while offset < total_size {
+        let end = (offset + IMPORT_CHUNK_BYTES).min(total_size);
+        let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes[offset..end]);
+        let id = next_id; next_id += 1;
+        call(
+            &mut ws,
+            id,
+            "importExport.prepareImport.uploadChunk",
+            serde_json::json!({
+                "sessionId": session_id,
+                "offset": offset,
+                "data": chunk_b64,
+            }),
+        ).await?;
+        offset = end;
+    }
+
+    // 3. complete
+    let id = next_id; next_id += 1;
+    call(
+        &mut ws,
+        id,
+        "importExport.prepareImport.complete",
+        serde_json::json!({
+            "sessionId": session_id,
+            "expectedChecksum": sha1_hex,
+        }),
+    ).await?;
+
+    // 4. importFull — apply with full reset-and-import. Note the asymmetry:
+    //    `connections` and `userconfig` only accept "unchanged" | "reset"
+    //    (no "reset-and-import"); connections are re-created by the apply pass.
+    let id = next_id;
+    let _ = next_id; // suppress unused after final increment
+    call(
+        &mut ws,
+        id,
+        "importExport.importFull",
+        serde_json::json!({
+            "config": {
+                "buttons":             "reset-and-import",
+                "surfaces": {
+                    "known":           "reset-and-import",
+                    "instances":       "reset-and-import",
+                    "remote":          "reset-and-import",
+                },
+                "triggers":            "reset-and-import",
+                "customVariables":     "reset-and-import",
+                "expressionVariables": "reset-and-import",
+                "connections":         "reset",
+                "userconfig":          "unchanged",
+            }
+        }),
+    ).await?;
+
+    let _ = ws.close(None).await;
+    Ok(())
+}
+
+/// Wait until Companion's `/api/version` endpoint returns 2xx, polling every
+/// 2 seconds for up to `timeout`.
+pub async fn wait_until_healthy(
+    client: &reqwest::Client,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let start = std::time::Instant::now();
+    let url = format!("{COMPANION_BASE}/api/version");
+    while start.elapsed() < timeout {
+        match client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await
+        {
+            Ok(r) if r.status().is_success() => return Ok(()),
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    Err(format!("Companion not healthy within {:?}", timeout))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
