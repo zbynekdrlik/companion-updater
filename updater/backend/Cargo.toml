@@ -21,6 +21,7 @@ tokio-stream = "0.1"
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect"] }
 sha1 = "0.10"
 base64 = "0.22"
+flate2 = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

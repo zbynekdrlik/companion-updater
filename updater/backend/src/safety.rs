@@ -39,7 +39,12 @@ impl Counts {
     }
 }
 
-/// Parse a Companion `.companionconfig` JSON byte stream and compute `Counts`.
+/// Parse a Companion `.companionconfig` byte stream and compute `Counts`.
+///
+/// `.companionconfig` files (and the bytes returned by `/int/export/full`) are
+/// gzip-compressed JSON; raw JSON is also accepted for tests and for callers
+/// that have already decompressed. The format is auto-detected from the
+/// gzip magic bytes (`1f 8b`).
 ///
 /// Schema (Companion v4.3, observed in real exports):
 ///   { "instances": { ... },                 // map of connection id -> spec
@@ -49,8 +54,22 @@ impl Counts {
 /// Each page entry contains a `controls` map (row -> col -> bank id). A page
 /// "has content" if `controls` has at least one row with at least one column.
 pub fn count_from_json(json: &[u8]) -> Result<Counts, String> {
+    let owned;
+    let bytes: &[u8] = if json.len() >= 2 && json[0] == 0x1f && json[1] == 0x8b {
+        use std::io::Read as _;
+        let mut decoder = flate2::read::GzDecoder::new(json);
+        let mut out = Vec::with_capacity(json.len() * 4);
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| format!("decompress companionconfig: {e}"))?;
+        owned = out;
+        &owned
+    } else {
+        json
+    };
+
     let v: serde_json::Value =
-        serde_json::from_slice(json).map_err(|e| format!("parse companionconfig: {e}"))?;
+        serde_json::from_slice(bytes).map_err(|e| format!("parse companionconfig: {e}"))?;
 
     let connections = v
         .get("instances")
@@ -369,6 +388,26 @@ mod tests {
     #[test]
     fn invalid_json_errors() {
         assert!(count_from_json(b"not json").is_err());
+    }
+
+    #[test]
+    fn counts_from_gzipped_companionconfig() {
+        // `/int/export/full` returns gzip-compressed JSON without setting
+        // `Content-Encoding: gzip`, so `count_from_json` must transparently
+        // decompress when it sees the gzip magic bytes.
+        use flate2::{write::GzEncoder, Compression};
+        use std::io::Write as _;
+        let raw = br#"{"instances":{"a":{},"b":{}},"triggers":{"t":{}},"pages":[{"controls":{"0":{"0":"x","1":"y"}}}]}"#;
+        let mut enc = GzEncoder::new(Vec::new(), Compression::fast());
+        enc.write_all(raw).unwrap();
+        let gzipped = enc.finish().unwrap();
+        // Sanity: gzip magic present.
+        assert_eq!(&gzipped[..2], &[0x1f, 0x8b]);
+        let c = count_from_json(&gzipped).unwrap();
+        assert_eq!(c.connections, 2);
+        assert_eq!(c.triggers, 1);
+        assert_eq!(c.buttons, 2);
+        assert_eq!(c.pages_with_content, 1);
     }
 
     #[test]
