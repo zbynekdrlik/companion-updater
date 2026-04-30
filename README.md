@@ -6,7 +6,8 @@ Production setup for [Bitfocus Companion](https://bitfocus.io/companion) with US
 
 - **Companion**: Native systemd service via [companion-pi](https://github.com/bitfocus/companion-pi) — direct USB/udev access for reliable Stream Deck hot-plug detection
 - **Cloudflare Tunnel**: Native systemd service for remote access without port forwarding
-- **Update Dashboard**: Native Rust binary (axum + Leptos/WASM) for checking and applying Companion updates
+- **Update Dashboard**: Native Rust binary (axum + Leptos/WASM) for checking and applying Companion updates, with a pre/post upgrade safety gate that auto-rolls back on data loss
+- **Off-machine Backups**: Hourly push of the Companion config to a private GitHub repo (`zbynekdrlik/companion-backups`), 30-day history retention
 - **Persistent Data**: Configuration stored at `~companion/.config/companion-nodejs/`
 
 ## Quick Start
@@ -144,6 +145,47 @@ sudo systemctl status companion-updater
 # Check full logs
 sudo journalctl -u companion-updater -n 100
 ```
+
+## Backups & Safety
+
+### Off-machine backups
+
+Each Companion host pushes the latest `.companionconfig` export to a private
+GitHub repo (`zbynekdrlik/companion-backups`) hourly via systemd timer.
+Last 30 days of hourly snapshots are retained per machine.
+
+Setup on a new host (one-time, after `deploy.sh` has installed the
+backup-pusher script and units):
+
+```bash
+sudo /usr/local/sbin/setup-backup-key.sh
+# Generates a deploy key, prints the public key, waits for ENTER once you've
+# added it (with write access) at:
+# https://github.com/zbynekdrlik/companion-backups/settings/keys
+# Then clones the repo and enables the timer.
+```
+
+Manual trigger / status:
+
+```bash
+sudo systemctl start companion-backup-push.service
+sudo systemctl status companion-backup-push.timer
+sudo journalctl -u companion-backup-push.service -n 30
+```
+
+### Upgrade safety gate
+
+The Rust `companion-updater` wraps every Companion upgrade with a pre/post
+snapshot. If any of `connections`, `pages_with_content`, `buttons`, or
+`triggers` decreases between snapshots, the updater automatically imports
+the pre-upgrade snapshot back via Companion's tRPC import API and surfaces
+the rollback in the dashboard.
+
+This is the gate that would have caught the v4.2 → v4.3 silent button drop
+on 2026-04-29.
+
+Pre-upgrade snapshots are kept at `/var/lib/companion-updater/pre-upgrade-archive/`
+for 7 days as an audit trail.
 
 ## License
 
