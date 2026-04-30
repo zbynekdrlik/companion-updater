@@ -1,16 +1,8 @@
 use crate::app::Status;
 use leptos::prelude::*;
-use serde::Deserialize;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{EventSource, MessageEvent};
-
-#[derive(Deserialize)]
-struct UpdateEvent {
-    #[serde(rename = "type")]
-    kind: String,
-    message: String,
-}
 
 #[component]
 pub fn UpdateButton(
@@ -78,14 +70,44 @@ pub fn UpdateButton(
         let on_message = Closure::<dyn FnMut(MessageEvent)>::new(
             move |event: MessageEvent| {
                 let data = event.data().as_string().unwrap_or_default();
-                let parsed: UpdateEvent = match serde_json::from_str(&data) {
-                    Ok(p) => p,
+                let val: serde_json::Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
                     Err(_) => return,
                 };
+                let kind = val
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let message = if let Some(m) = val.get("message").and_then(|m| m.as_str()) {
+                    m.to_string()
+                } else if kind == "safety_pre" || kind == "safety_post" {
+                    // Format counts inline.
+                    let c = val.get("counts").cloned().unwrap_or_default();
+                    let connections =
+                        c.get("connections").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let pages =
+                        c.get("pages_with_content").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let buttons = c.get("buttons").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let triggers = c.get("triggers").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let label = if kind == "safety_pre" {
+                        "Pre-upgrade snapshot"
+                    } else {
+                        "Post-upgrade snapshot"
+                    };
+                    format!(
+                        "{label}: {connections} connections, {pages} pages, {buttons} buttons, {triggers} triggers"
+                    )
+                } else {
+                    "(no message)".to_string()
+                };
+
                 set_progress_lines.update(|v| {
-                    v.push((parsed.kind.clone(), parsed.message.clone()));
+                    v.push((kind.clone(), message));
                 });
-                if parsed.kind == "complete" || parsed.kind == "error" {
+
+                let terminal = matches!(kind.as_str(), "complete" | "error" | "safety_rollback");
+                if terminal {
                     es_for_msg.close();
                     set_updating.set(false);
                     // Refresh status after a short delay
