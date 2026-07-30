@@ -347,6 +347,78 @@ mod tests {
     }
 
     #[test]
+    fn skip_marker_matches_update_script_skip_line() {
+        assert!(is_skip_marker("Skipping update"));
+    }
+
+    #[test]
+    fn skip_marker_matches_picker_no_build_line() {
+        assert!(is_skip_marker("No matching stable build was found!"));
+    }
+
+    #[test]
+    fn skip_marker_ignores_ordinary_progress() {
+        assert!(!is_skip_marker("Extracting..."));
+        assert!(!is_skip_marker("Installing from https://example.com/x.tar.gz"));
+    }
+
+    /// Regression: companion-snv reported "Update complete. Now running v4.3.4"
+    /// while v5.0.2 was the latest stable and nothing had been installed — the
+    /// stale companion-pi picker printed "No matching stable build was found!",
+    /// update.sh printed "Skipping update" and exited 0.
+    #[test]
+    fn outcome_failed_when_skipped_and_newer_version_available() {
+        let outcome = classify_outcome("4.3.4", "4.3.4", "v5.0.2", true);
+        match outcome {
+            Outcome::Failed(msg) => {
+                assert!(msg.contains("4.3.4"), "got {msg}");
+                assert!(msg.contains("5.0.2"), "got {msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outcome_failed_when_version_unchanged_without_marker() {
+        assert!(matches!(
+            classify_outcome("4.3.4", "4.3.4", "v5.0.2", false),
+            Outcome::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn outcome_applied_when_version_changed() {
+        assert_eq!(
+            classify_outcome("4.3.4", "5.0.2", "v5.0.2", false),
+            Outcome::Applied
+        );
+    }
+
+    #[test]
+    fn outcome_applied_even_if_a_skip_marker_appeared_but_version_moved() {
+        assert_eq!(
+            classify_outcome("4.3.4", "5.0.2", "v5.0.2", true),
+            Outcome::Applied
+        );
+    }
+
+    #[test]
+    fn outcome_already_latest_when_unchanged_and_current_is_newest() {
+        assert_eq!(
+            classify_outcome("5.0.2+9300", "5.0.2+9300", "v5.0.2", true),
+            Outcome::AlreadyLatest
+        );
+    }
+
+    #[test]
+    fn outcome_already_latest_when_installed_is_ahead_of_latest() {
+        assert_eq!(
+            classify_outcome("5.1.0", "5.1.0", "v5.0.2", false),
+            Outcome::AlreadyLatest
+        );
+    }
+
+    #[test]
     fn event_safety_rollback_includes_lost_counts() {
         let e = UpdateEvent::SafetyRollback {
             message: "rolled back".into(),
