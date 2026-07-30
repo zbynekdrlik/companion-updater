@@ -11,30 +11,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  backend:
-    name: Backend (clippy + tests)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: updater
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        run: rustup toolchain install stable --profile minimal --component clippy
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: updater
-
-      - name: Clippy
-        run: cargo clippy -p companion-updater --all-targets -- -D warnings
-
-      - name: Tests
-        run: cargo test -p companion-updater
-
-  frontend:
-    name: Frontend (wasm clippy + build)
+  rust:
+    name: Rust (frontend + backend)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -56,12 +34,20 @@ jobs:
         with:
           version: latest
 
-      - name: Clippy
+      - name: Clippy (frontend)
         run: cargo clippy -p companion-updater-frontend --target wasm32-unknown-unknown -- -D warnings
 
-      - name: Build
+      # The backend embeds frontend/dist via include_dir!, so the WASM bundle
+      # must exist before anything compiles the backend.
+      - name: Build frontend
         run: trunk build --release
         working-directory: updater/frontend
+
+      - name: Clippy (backend)
+        run: cargo clippy -p companion-updater --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test -p companion-updater
 
   scripts:
     name: Shell scripts
