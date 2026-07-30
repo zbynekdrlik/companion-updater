@@ -44,6 +44,8 @@ struct StatusResponse {
     cooldown_remaining: u64,
     last_checked: String,
     error: Option<String>,
+    /// Version of this updater itself, so a deploy can be verified from the UI.
+    updater_version: String,
 }
 
 #[tokio::main]
@@ -54,6 +56,10 @@ async fn main() {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    // If a previous run was killed while Companion was stopped for an upgrade,
+    // bring Companion back before serving anything.
+    update::reconcile_companion_state();
 
     let state = AppState {
         http: reqwest::Client::builder()
@@ -87,14 +93,7 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
     let cooldown_remaining = {
         let last = state.last_update.lock().await;
         match *last {
-            Some(t) => {
-                let elapsed = t.elapsed().as_secs();
-                if elapsed >= COOLDOWN_SECS {
-                    0
-                } else {
-                    COOLDOWN_SECS - elapsed
-                }
-            }
+            Some(t) => COOLDOWN_SECS.saturating_sub(t.elapsed().as_secs()),
             None => 0,
         }
     };
@@ -132,6 +131,7 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         cooldown_remaining,
         last_checked: Local::now().format("%H:%M:%S").to_string(),
         error,
+        updater_version: format!("v{}", env!("CARGO_PKG_VERSION")),
     })
 }
 
@@ -166,11 +166,16 @@ async fn update_stream_handler(
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        update::run_update(tx).await;
+        let succeeded = update::run_update(tx).await;
         let mut running = state_clone.update_running.lock().await;
         *running = false;
-        let mut last = state_clone.last_update.lock().await;
-        *last = Some(Instant::now());
+        // Only a successful run starts the cooldown. A failed one must be
+        // retryable straight away — waiting 5 minutes to retry an upgrade that
+        // did nothing helps nobody.
+        if succeeded {
+            let mut last = state_clone.last_update.lock().await;
+            *last = Some(Instant::now());
+        }
     });
 
     let stream = ReceiverStream::new(rx).map(|event| {

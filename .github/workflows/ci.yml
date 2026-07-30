@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust (frontend + backend)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: updater
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup target add wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: updater
+
+      - name: Install trunk
+        uses: jetli/trunk-action@v0.5.0
+        with:
+          version: latest
+
+      - name: Clippy (frontend)
+        run: cargo clippy -p companion-updater-frontend --target wasm32-unknown-unknown -- -D warnings
+
+      # The backend embeds frontend/dist via include_dir!, so the WASM bundle
+      # must exist before anything compiles the backend.
+      - name: Build frontend
+        run: trunk build --release
+        working-directory: updater/frontend
+
+      - name: Clippy (backend)
+        run: cargo clippy -p companion-updater --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test -p companion-updater
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=error deploy.sh setup.sh updater/build.sh host/*.sh

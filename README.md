@@ -28,9 +28,23 @@ Built from `updater/` and deployed via `deploy.sh` as a systemd service:
 - Service: `systemctl status companion-updater`
 - Port: 8081
 
-The updater reads `/opt/companion/package.json` for the current version,
-fetches the latest stable from the Bitfocus builds API, and runs
-`update.sh stable` when triggered.
+The updater reads `/opt/companion/package.json` for the current version and
+fetches the latest stable from the Bitfocus builds API. Its own version is
+shown on the dashboard as "Dashboard", so a deploy can be verified from the UI.
+
+When an update is triggered it:
+
+1. Exports the full Companion config and counts connections / buttons / triggers
+   (pre-upgrade snapshot, archived under `/var/lib/companion-updater/`).
+2. Runs `git pull` in `/usr/local/src/companionpi` — **required**: the version
+   picker that `update.sh` invokes lives there, and a stale copy silently
+   refuses every newer major release.
+3. Stops Companion, runs `update.sh stable`, starts Companion, waits for health.
+4. Re-exports and compares the counts; on any decrease it re-imports the
+   pre-upgrade snapshot and reports a rollback.
+5. Compares the installed version before/after. `update.sh` exits 0 even when it
+   installs nothing ("Skipping update" / "No matching stable build was found!"),
+   so a version that did not move is reported as an **error**, never as success.
 
 ### 3. Access
 
@@ -51,9 +65,11 @@ COMPANION_HOST=10.0.0.50 COMPANION_USER=admin COMPANION_PASS=secret ./deploy.sh
 
 The deploy script:
 1. Installs udev rules from `host/` to `/etc/udev/rules.d/`
-2. Updates Companion via `companion-update`
-3. Restarts the Companion systemd service
-4. Builds the `companion-updater` Rust binary locally and installs it as a systemd service
+2. Installs the backup pusher (script + systemd timer)
+3. Builds the `companion-updater` Rust binary locally and installs it as a systemd service
+4. Triggers the Companion upgrade through that freshly deployed updater
+   (binary first, upgrade second — otherwise a fix to the upgrade path could
+   never take effect in the deploy that ships it)
 5. Waits for health checks to pass
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
