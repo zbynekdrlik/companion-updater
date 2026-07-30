@@ -71,16 +71,40 @@ else
   echo "  Then re-run this deploy or:  sudo systemctl enable --now companion-backup-push.timer"
 fi
 
-# Step 4: Update Companion through the safety-gated updater endpoint.
+# Step 4: Build companion-updater binary locally
+echo "[4/7] Building companion-updater..."
+"${SCRIPT_DIR}/updater/build.sh"
+BIN="${SCRIPT_DIR}/updater/target/release/companion-updater"
+if [ ! -x "${BIN}" ]; then
+  echo "ERROR: ${BIN} not found"
+  exit 1
+fi
+
+# Step 5: Deploy companion-updater binary and systemd unit
 #
-# This step talks to the companion-updater currently running on the host. On
-# the very first deploy of this PR the running binary is the OLD one without
-# safety hooks — its /api/update/stream still emits "type":"complete" on
-# success but no safety_pre/safety_post. The new binary deployed in step 6
-# will emit the full safety event sequence on the next run. There's no clean
-# way to swap binaries before the upgrade without dropping the cooldown
-# state, so we accept that the first run uses the old code path.
-echo "[4/7] Updating Companion via companion-updater (safety-gated)..."
+# The binary is deployed BEFORE the Companion upgrade is triggered, so the
+# upgrade always runs through the code in THIS checkout. Doing it the other way
+# round meant a deploy could never fix a bug in the upgrade path itself — the
+# old binary ran the upgrade, and the fix only took effect a deploy later.
+echo "[5/7] Deploying companion-updater..."
+remote "sudo systemctl stop companion-updater 2>/dev/null || true"
+remote_copy "${BIN}" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater"
+remote "sudo install -m 0755 /tmp/companion-updater /usr/local/bin/companion-updater && rm /tmp/companion-updater"
+remote_copy "${SCRIPT_DIR}/updater/companion-updater.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater.service"
+remote "sudo install -m 0644 /tmp/companion-updater.service /etc/systemd/system/companion-updater.service && rm /tmp/companion-updater.service"
+remote "sudo systemctl daemon-reload && sudo systemctl enable --now companion-updater"
+echo "  companion-updater deployed."
+
+# Wait for the freshly started updater to serve before driving it.
+for _ in $(seq 1 12); do
+  if remote "curl -sf --max-time 3 http://127.0.0.1:8081/healthz" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+# Step 6: Update Companion through the safety-gated updater endpoint.
+echo "[6/7] Updating Companion via companion-updater (safety-gated)..."
 # Stream the SSE update endpoint. We grep for the first terminal event in the
 # stream: complete = success, safety_rollback = data loss + auto-reverted,
 # error = anything else. The first match wins; we then stop reading.
@@ -108,25 +132,6 @@ case "${TERMINAL_LINE}" in
     exit 1
     ;;
 esac
-
-# Step 5: Build companion-updater binary locally
-echo "[5/7] Building companion-updater..."
-"${SCRIPT_DIR}/updater/build.sh"
-BIN="${SCRIPT_DIR}/updater/target/release/companion-updater"
-if [ ! -x "${BIN}" ]; then
-  echo "ERROR: ${BIN} not found"
-  exit 1
-fi
-
-# Step 6: Deploy companion-updater binary and systemd unit
-echo "[6/7] Deploying companion-updater..."
-remote "sudo systemctl stop companion-updater 2>/dev/null || true"
-remote_copy "${BIN}" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater"
-remote "sudo install -m 0755 /tmp/companion-updater /usr/local/bin/companion-updater && rm /tmp/companion-updater"
-remote_copy "${SCRIPT_DIR}/updater/companion-updater.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater.service"
-remote "sudo install -m 0644 /tmp/companion-updater.service /etc/systemd/system/companion-updater.service && rm /tmp/companion-updater.service"
-remote "sudo systemctl daemon-reload && sudo systemctl enable --now companion-updater"
-echo "  companion-updater deployed."
 
 # Step 7: Health check
 echo "[7/7] Waiting for services to be ready..."

@@ -13,6 +13,8 @@ pub struct Status {
     pub last_checked: String,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub updater_version: String,
 }
 
 #[component]

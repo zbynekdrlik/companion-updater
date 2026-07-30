@@ -5,12 +5,72 @@
 //! restarts the companion service.
 
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
 const UPDATE_SCRIPT: &str = "/usr/local/src/companionpi/update.sh";
+const COMPANIONPI_DIR: &str = "/usr/local/src/companionpi";
+
+/// Lines the companion-pi tooling prints when it deliberately installs nothing.
+///
+/// `update.sh` prints "Skipping update" whenever the version picker wrote no
+/// selection file, and the picker itself prints "No matching <branch> build was
+/// found!" when its version whitelist rejects every published build. Both paths
+/// exit 0, so the exit status alone cannot tell success from a silent no-op.
+const SKIP_MARKERS: [&str; 3] = [
+    "Skipping update",
+    "build was found!",
+    "is already installed",
+];
+
+/// What actually happened to `/opt/companion` during a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The installed version changed — the upgrade landed.
+    Applied,
+    /// Nothing changed, and nothing needed to: we already run the newest build.
+    AlreadyLatest,
+    /// Nothing changed although a newer build exists. The reason is in the message.
+    Failed(String),
+}
+
+/// True when `line` is one of the companion-pi "installed nothing" markers.
+pub fn is_skip_marker(line: &str) -> bool {
+    SKIP_MARKERS.iter().any(|m| line.contains(m))
+}
+
+/// Decide whether an update run actually installed anything.
+///
+/// `pre`/`post` are the versions read from `/opt/companion/package.json` around
+/// the run; `latest` is the newest stable build Bitfocus advertises; `skipped`
+/// is true when any [`is_skip_marker`] line appeared in the script output.
+///
+/// A changed version always wins — the markers are advisory, the installed
+/// version is the ground truth.
+pub fn classify_outcome(pre: &str, post: &str, latest: &str, skipped: bool) -> Outcome {
+    if crate::version::compare(pre, post) != std::cmp::Ordering::Equal {
+        return Outcome::Applied;
+    }
+    if !crate::version::is_update_available(post, latest) {
+        return Outcome::AlreadyLatest;
+    }
+    let reason = if skipped {
+        "the companion-pi installer reported it had no matching build to install \
+         (its version whitelist may not cover this release yet)"
+    } else {
+        "the update script exited successfully but /opt/companion is unchanged"
+    };
+    Outcome::Failed(format!(
+        "Update did NOT apply: still running {} while {} is available — {}.",
+        crate::version::format(post),
+        crate::version::format(latest),
+        reason
+    ))
+}
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -84,37 +144,62 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
     }
     let _ = tx.send(UpdateEvent::SafetyPre { counts: pre_counts }).await;
 
-    // 2. Run update.sh stable.
+    // 2. Record the ground truth we compare against at the end.
+    let pre_version = match crate::companion::read_installed_version().await {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("cannot read installed version: {e}"),
+            }).await;
+            return;
+        }
+    };
+    let latest_version = crate::bitfocus::fetch_latest_stable_linux(&http)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "could not fetch latest stable version");
+            pre_version.clone()
+        });
+    tracing::info!(pre = %pre_version, latest = %latest_version, "update run starting");
+
+    // 3. Self-update the companion-pi tooling FIRST. Upstream's own
+    //    `companion-update` wrapper does this; skipping it leaves an old version
+    //    picker in place that silently refuses every newer major release.
+    update_companionpi_checkout(&tx).await;
+
+    // 4. Stop Companion, then run update.sh stable. update.sh deletes and
+    //    recreates /opt/companion, so the service must not be running.
     let _ = tx.send(UpdateEvent::Progress {
-        message: "Starting update (stable channel)...".into(),
+        message: "Stopping companion service...".into(),
     }).await;
-    if let Err(e) = run_update_script(&tx).await {
+    if let Err(e) = systemctl(&["stop", "companion"]).await {
         let _ = tx.send(UpdateEvent::Error { message: e }).await;
         return;
     }
 
-    // 3. Restart Companion + wait for healthy.
     let _ = tx.send(UpdateEvent::Progress {
-        message: "Restarting companion service...".into(),
+        message: "Starting update (stable channel)...".into(),
     }).await;
-    match Command::new("sudo")
-        .args(["systemctl", "restart", "companion"])
-        .status()
-        .await
-    {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
-            let _ = tx.send(UpdateEvent::Error {
-                message: format!("systemctl restart exited with {s}"),
-            }).await;
-            return;
-        }
+    let skipped = match run_update_script(&tx).await {
+        Ok(skipped) => skipped,
         Err(e) => {
-            let _ = tx.send(UpdateEvent::Error {
-                message: format!("systemctl restart failed: {e}"),
+            // Never leave the rig with Companion down because the script failed.
+            let _ = tx.send(UpdateEvent::Progress {
+                message: "Update script failed — restarting Companion...".into(),
             }).await;
+            let _ = systemctl(&["start", "companion"]).await;
+            let _ = tx.send(UpdateEvent::Error { message: e }).await;
             return;
         }
+    };
+
+    // 5. Start Companion + wait for healthy.
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Starting companion service...".into(),
+    }).await;
+    if let Err(e) = systemctl(&["start", "companion"]).await {
+        let _ = tx.send(UpdateEvent::Error { message: e }).await;
+        return;
     }
     if let Err(e) =
         crate::safety::wait_until_healthy(&http, std::time::Duration::from_secs(60)).await
@@ -125,7 +210,7 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
         return;
     }
 
-    // 4. Post-upgrade snapshot.
+    // 6. Post-upgrade snapshot.
     let _ = tx.send(UpdateEvent::Progress {
         message: "Taking post-upgrade snapshot...".into(),
     }).await;
@@ -149,7 +234,7 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
     };
     let _ = tx.send(UpdateEvent::SafetyPost { counts: post_counts }).await;
 
-    // 5. Compare; rollback if any decrease.
+    // 7. Compare; rollback if any decrease.
     if pre_counts.any_decreased(&post_counts) {
         let lost = pre_counts.lost(&post_counts);
         let _ = tx.send(UpdateEvent::Progress {
@@ -180,10 +265,31 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
         return;
     }
 
-    // 6. Success.
+    // 8. Did anything actually install? Exit status 0 does NOT mean it did.
     let new_version = crate::companion::read_installed_version()
         .await
         .unwrap_or_else(|_| "unknown".into());
+    let outcome = classify_outcome(&pre_version, &new_version, &latest_version, skipped);
+    tracing::info!(
+        pre = %pre_version, post = %new_version, latest = %latest_version,
+        skipped, ?outcome, "update run finished"
+    );
+    let summary = match outcome {
+        Outcome::Failed(message) => {
+            let _ = tx.send(UpdateEvent::Error { message }).await;
+            return;
+        }
+        Outcome::AlreadyLatest => format!(
+            "Nothing to install — already running the latest build {}",
+            crate::version::format(&new_version)
+        ),
+        Outcome::Applied => format!(
+            "Update complete. Now running {} (was {})",
+            crate::version::format(&new_version),
+            crate::version::format(&pre_version)
+        ),
+    };
+
     let diff = crate::safety::Counts {
         connections: post_counts.connections.saturating_sub(pre_counts.connections),
         pages_with_content: post_counts
@@ -193,12 +299,68 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) {
         triggers: post_counts.triggers.saturating_sub(pre_counts.triggers),
     };
     let _ = tx.send(UpdateEvent::Complete {
-        message: format!(
-            "Update complete. Now running {}",
-            crate::version::format(&new_version)
-        ),
+        message: summary,
         diff: Some(diff),
     }).await;
+}
+
+/// Run `sudo systemctl <args>`, mapping any non-success into a readable error.
+async fn systemctl(args: &[&str]) -> Result<(), String> {
+    let mut argv = vec!["systemctl"];
+    argv.extend_from_slice(args);
+    tracing::info!(?argv, "running systemctl");
+    match Command::new("sudo").args(&argv).status().await {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("systemctl {} exited with {s}", args.join(" "))),
+        Err(e) => Err(format!("systemctl {} failed: {e}", args.join(" "))),
+    }
+}
+
+/// `git pull` the companion-pi checkout so the version picker that update.sh
+/// invokes is the current one.
+///
+/// A failure here is reported but not fatal: the run continues and the
+/// end-of-run version check catches a resulting no-op, which is a far more
+/// useful error than aborting on a transient network hiccup.
+async fn update_companionpi_checkout(tx: &mpsc::Sender<UpdateEvent>) {
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Updating companion-pi installer (git pull)...".into(),
+    }).await;
+    let output = Command::new("sudo")
+        .args(["git", "-C", COMPANIONPI_DIR, "pull", "--ff-only"])
+        .output()
+        .await;
+    match output {
+        Ok(out) => {
+            for stream in [&out.stdout, &out.stderr] {
+                for line in String::from_utf8_lossy(stream).lines() {
+                    if !line.trim().is_empty() {
+                        let _ = tx.send(UpdateEvent::Progress {
+                            message: line.to_string(),
+                        }).await;
+                    }
+                }
+            }
+            if out.status.success() {
+                tracing::info!("companion-pi checkout updated");
+            } else {
+                tracing::warn!(status = %out.status, "git pull of companion-pi failed");
+                let _ = tx.send(UpdateEvent::Progress {
+                    message: format!(
+                        "WARNING: could not update the companion-pi installer ({}). \
+                         Continuing with the installed copy.",
+                        out.status
+                    ),
+                }).await;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not run git pull for companion-pi");
+            let _ = tx.send(UpdateEvent::Progress {
+                message: format!("WARNING: could not run git pull in {COMPANIONPI_DIR}: {e}"),
+            }).await;
+        }
+    }
 }
 
 async fn save_snapshot(bytes: &[u8]) -> Result<(), String> {
@@ -247,7 +409,11 @@ async fn prune_archive(dir: &str) {
     }
 }
 
-async fn run_update_script(tx: &mpsc::Sender<UpdateEvent>) -> Result<(), String> {
+/// Run `update.sh stable`, streaming its output.
+///
+/// Returns whether the script announced that it installed nothing (see
+/// [`is_skip_marker`]) — the exit status is 0 either way.
+async fn run_update_script(tx: &mpsc::Sender<UpdateEvent>) -> Result<bool, String> {
     let mut child = Command::new("sudo")
         .args(["bash", UPDATE_SCRIPT, "stable"])
         .stdout(Stdio::piped())
@@ -257,20 +423,31 @@ async fn run_update_script(tx: &mpsc::Sender<UpdateEvent>) -> Result<(), String>
 
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
+    let skipped = Arc::new(AtomicBool::new(false));
 
     let tx_out = tx.clone();
+    let skipped_out = Arc::clone(&skipped);
     let stdout_handle = tokio::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!(target: "update_script", "{line}");
+            if is_skip_marker(&line) {
+                skipped_out.store(true, AtomicOrdering::SeqCst);
+            }
             let _ = tx_out.send(UpdateEvent::Progress { message: line }).await;
         }
     });
     let tx_err = tx.clone();
+    let skipped_err = Arc::clone(&skipped);
     let stderr_handle = tokio::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            tracing::info!(target: "update_script", "{line}");
+            if is_skip_marker(&line) {
+                skipped_err.store(true, AtomicOrdering::SeqCst);
+            }
             let _ = tx_err.send(UpdateEvent::Progress { message: line }).await;
         }
     });
@@ -281,7 +458,7 @@ async fn run_update_script(tx: &mpsc::Sender<UpdateEvent>) -> Result<(), String>
     if !status.success() {
         return Err(format!("update.sh exited with {status}"));
     }
-    Ok(())
+    Ok(skipped.load(AtomicOrdering::SeqCst))
 }
 
 #[cfg(test)]

@@ -44,6 +44,8 @@ struct StatusResponse {
     cooldown_remaining: u64,
     last_checked: String,
     error: Option<String>,
+    /// Version of this updater itself, so a deploy can be verified from the UI.
+    updater_version: String,
 }
 
 #[tokio::main]
@@ -87,14 +89,7 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
     let cooldown_remaining = {
         let last = state.last_update.lock().await;
         match *last {
-            Some(t) => {
-                let elapsed = t.elapsed().as_secs();
-                if elapsed >= COOLDOWN_SECS {
-                    0
-                } else {
-                    COOLDOWN_SECS - elapsed
-                }
-            }
+            Some(t) => COOLDOWN_SECS.saturating_sub(t.elapsed().as_secs()),
             None => 0,
         }
     };
@@ -132,6 +127,7 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
         cooldown_remaining,
         last_checked: Local::now().format("%H:%M:%S").to_string(),
         error,
+        updater_version: format!("v{}", env!("CARGO_PKG_VERSION")),
     })
 }
 

@@ -38,6 +38,10 @@ pub fn StatusCard(status: ReadSignal<Option<Status>>) -> impl IntoView {
                         <span class="status-label">"Last checked"</span>
                         <span class="status-value">{s.last_checked.clone()}</span>
                     </div>
+                    <div class="status-row">
+                        <span class="status-label">"Dashboard"</span>
+                        <span class="status-value" id="updater-version">{s.updater_version.clone()}</span>
+                    </div>
                     {s.error.clone().map(|e| view! {
                         <div class="error-banner">{e}</div>
                     })}
