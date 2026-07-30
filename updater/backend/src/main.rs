@@ -57,6 +57,10 @@ async fn main() {
         )
         .init();
 
+    // If a previous run was killed while Companion was stopped for an upgrade,
+    // bring Companion back before serving anything.
+    update::reconcile_companion_state();
+
     let state = AppState {
         http: reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -162,11 +166,16 @@ async fn update_stream_handler(
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        update::run_update(tx).await;
+        let succeeded = update::run_update(tx).await;
         let mut running = state_clone.update_running.lock().await;
         *running = false;
-        let mut last = state_clone.last_update.lock().await;
-        *last = Some(Instant::now());
+        // Only a successful run starts the cooldown. A failed one must be
+        // retryable straight away — waiting 5 minutes to retry an upgrade that
+        // did nothing helps nobody.
+        if succeeded {
+            let mut last = state_clone.last_update.lock().await;
+            *last = Some(Instant::now());
+        }
     });
 
     let stream = ReceiverStream::new(rx).map(|event| {
