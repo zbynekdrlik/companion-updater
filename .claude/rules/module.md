@@ -38,7 +38,8 @@ Behaviour the tests pin down:
 
 - `COMPANION_PASS=… module/deploy.sh <host>` (companion.lan = snv, 100.101.72.101 = pp). It deploys only committed, pushed code.
 - A remote EXIT trap always restarts Companion.
-- A deploy that passes verification stamps `${DEST}/.verified`, and `${DEST}.old` is always a verified module. At install time a stamped `DEST` becomes `.old`; an unstamped leftover from a half-failed deploy is simply replaced.
+- NEVER leave a second copy of a module inside `/opt/companion-module-dev`. Companion loads every directory there, and a duplicate id silently wins: a `resolume-simple.old` backup in that directory made Companion run the old version. The fallback lives in `/opt/companion-module-backup/<id>`, and the verify script fails if the id appears more than once.
+- A deploy that passes verification stamps `${DEST}/.verified`, and the backup copy is always a verified module. At install time a stamped `DEST` becomes the backup; an unstamped leftover from a half-failed deploy is simply replaced.
 - Verification (`module/verify-deploy.py`, run as root on the rig, reading the DB of the RUNNING Companion version) requires every enabled resolume-simple connection to log the outcome of its first health check after the restart. Either `Connected to …` or `Resolume not reachable: …` counts, because a switched-off Arena is not a broken module.
 - Any failure (install, restart, verification, unknown DB schema) rolls back to `.old`.
 - The verify script exits 0 (ok), 3 (waiting), 2 (cannot verify), or 4 (module errors logged; only checked when no connection exists).
