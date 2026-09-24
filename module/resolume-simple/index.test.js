@@ -78,6 +78,7 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		}
 		server = await startFakeArena(state)
 		instance = new mod.ResolumeSimpleInstance({})
+		instance.requestTimeoutMs = 10000 // behaviour, not timing: a loaded box must not flake these
 		await instance.init({ host: '127.0.0.1', restPort: server.address().port, oscPort: 7002 })
 	})
 

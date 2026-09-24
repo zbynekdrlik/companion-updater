@@ -44,7 +44,8 @@ describe('ResolumeClient against a fake Arena', () => {
 			decks: ['NewLevel', 'NewLevel 2', 'GoodFest SNV'],
 		}
 		server = await startFakeArena(state)
-		client = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}/`, timeoutMs: 2000 })
+		// Generous: these tests are about behaviour, not timing (a loaded box must not flake them).
+		client = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}/`, timeoutMs: 10000 })
 	})
 
 	afterEach(async () => {
