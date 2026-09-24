@@ -4,59 +4,29 @@ const { test, describe, beforeEach, afterEach } = require('node:test')
 const assert = require('node:assert/strict')
 const http = require('node:http')
 const { ResolumeClient, ResolumeError, findColumnIndex } = require('./resolume')
-
-/**
- * A real HTTP server shaped like Arena 7.27's REST API: one column per
- * GET /api/v1/composition/columns/{n} (404 past the last one), 204 on connect.
- */
-function startFakeArena(state) {
-	const server = http.createServer((req, res) => {
-		state.requests.push(`${req.method} ${req.url}`)
-		if (state.hang) return // never answer: simulates a wedged Arena
-		const url = req.url
-		let m
-		if (req.method === 'GET' && url === '/api/v1/product') {
-			res.writeHead(200, { 'Content-Type': 'application/json' })
-			return res.end(JSON.stringify({ name: 'Arena', major: 7, minor: 27, micro: 1, revision: 15990 }))
-		}
-		if ((m = url.match(/^\/api\/v1\/composition(?:\/layergroups\/(\d+))?\/columns\/(\d+)(\/connect)?$/))) {
-			const group = m[1] ? Number(m[1]) : 0
-			const index = Number(m[2])
-			const names = state.columns[group] || []
-			if (index < 1 || index > names.length) {
-				res.writeHead(404, { 'Content-Type': 'application/json' })
-				return res.end('{"error":"Column not found"}')
-			}
-			if (m[3] && req.method === 'POST') {
-				if (state.connectStatus && state.connectStatus !== 204) {
-					res.writeHead(state.connectStatus)
-					return res.end()
-				}
-				state.connected.push({ group, index })
-				res.writeHead(204)
-				return res.end()
-			}
-			if (req.method === 'GET' && !m[3]) {
-				res.writeHead(200, { 'Content-Type': 'application/json' })
-				return res.end(JSON.stringify({ id: 1000 + index, name: { valuetype: 'ParamString', value: names[index - 1] } }))
-			}
-		}
-		res.writeHead(404)
-		res.end()
-	})
-	return new Promise((resolve) => {
-		server.listen(0, '127.0.0.1', () => resolve(server))
-	})
-}
+const { startFakeArena, stopFakeArena, ALLOWED_REQUEST } = require('../testing/fake-arena')
 
 describe('findColumnIndex', () => {
-	test('prefers an exact match, then falls back to case-insensitive', () => {
+	test('prefers an exact match anywhere, then falls back to case-insensitive', () => {
 		const names = ['BLANK', 'ytfast', 'YTFAST', '5MIN']
 		assert.equal(findColumnIndex(names, 'YTFAST'), 3)
 		assert.equal(findColumnIndex(names, 'ytfast'), 2)
 		assert.equal(findColumnIndex(names, '5min'), 4)
 		assert.equal(findColumnIndex(names, ' 5MIN '), 4)
 		assert.equal(findColumnIndex(names, 'KOSIK'), undefined)
+	})
+
+	test('"#" in a name also matches the column number Arena shows for it', () => {
+		const names = ['Blank', 'ytfast', 'Kosik #', 'Column #', 'Column #']
+		assert.equal(findColumnIndex(names, 'Kosik #'), 3)
+		assert.equal(findColumnIndex(names, 'kosik 3'), 3)
+		assert.equal(findColumnIndex(names, 'Column 5'), 5)
+		assert.equal(findColumnIndex(names, 'Column 4'), 4)
+	})
+
+	test('an empty name never matches, not even an unnamed column', () => {
+		assert.equal(findColumnIndex(['', 'x'], ''), undefined)
+		assert.equal(findColumnIndex(['', 'x'], '   '), undefined)
 	})
 })
 
@@ -67,23 +37,18 @@ describe('ResolumeClient against a fake Arena', () => {
 
 	beforeEach(async () => {
 		state = {
-			requests: [],
-			connected: [],
-			hang: false,
-			connectStatus: 204,
 			columns: {
 				0: ['BLANK', 'YTFAST', '5MIN', '1MIN', 'KOSIK'],
 				2: ['Blank', 'ytfast', '5min', 'Kosik #'],
 			},
+			decks: ['NewLevel', 'NewLevel 2', 'GoodFest SNV'],
 		}
 		server = await startFakeArena(state)
-		const { port } = server.address()
-		client = new ResolumeClient({ baseUrl: `http://127.0.0.1:${port}/`, timeoutMs: 300 })
+		client = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}/`, timeoutMs: 300 })
 	})
 
 	afterEach(async () => {
-		server.closeAllConnections()
-		await new Promise((resolve) => server.close(resolve))
+		await stopFakeArena(server)
 	})
 
 	test('product() returns Arena version info', async () => {
@@ -93,29 +58,31 @@ describe('ResolumeClient against a fake Arena', () => {
 	})
 
 	test('connects a composition column by name with one POST to the right index', async () => {
-		const index = await client.connectColumnByName('5MIN')
-		assert.equal(index, 3)
+		assert.deepEqual(await client.connectColumnByName('5MIN'), { index: 3, superseded: false })
 		assert.deepEqual(state.connected, [{ group: 0, index: 3 }])
 		assert.ok(state.requests.includes('POST /api/v1/composition/columns/3/connect'))
 	})
 
-	test('never requests the whole composition', async () => {
+	test('only ever calls the tiny endpoints (never the whole composition)', async () => {
+		await client.product()
 		await client.connectColumnByName('KOSIK')
-		assert.equal(
-			state.requests.filter((r) => r === 'GET /api/v1/composition' || r === 'GET /api/v1/composition/').length,
-			0,
-		)
+		await client.connectColumnByName('kosik 4', 2)
+		await assert.rejects(client.connectColumnByName('NOPE'))
+		for (const r of state.requests) assert.match(r, ALLOWED_REQUEST)
 	})
 
 	test('matches names case-insensitively when there is no exact match', async () => {
-		assert.equal(await client.connectColumnByName('kosik'), 5)
+		assert.equal((await client.connectColumnByName('kosik')).index, 5)
 	})
 
-	test('connects a layer-group column by name', async () => {
-		const index = await client.connectColumnByName('5min', 2)
-		assert.equal(index, 3)
-		assert.deepEqual(state.connected, [{ group: 2, index: 3 }])
-		assert.ok(state.requests.includes('POST /api/v1/composition/layergroups/2/columns/3/connect'))
+	test('connects a layer-group column by name, including a "#" name', async () => {
+		assert.equal((await client.connectColumnByName('YTFAST', 2)).index, 2)
+		assert.equal((await client.connectColumnByName('Kosik #', 2)).index, 4)
+		assert.deepEqual(state.connected, [
+			{ group: 2, index: 2 },
+			{ group: 2, index: 4 },
+		])
+		assert.ok(state.requests.includes('POST /api/v1/composition/layergroups/2/columns/4/connect'))
 	})
 
 	test('a second press reuses the cache: one GET to re-check the column, then the POST', async () => {
@@ -128,9 +95,42 @@ describe('ResolumeClient against a fake Arena', () => {
 	test('picks up columns moved in Arena after the cache was built', async () => {
 		await client.connectColumnByName('KOSIK')
 		state.columns[0] = ['BLANK', 'KOSIK', 'YTFAST', '5MIN', '1MIN'] // KOSIK moved from 5 to 2
-		const index = await client.connectColumnByName('KOSIK')
-		assert.equal(index, 2)
+		assert.equal((await client.connectColumnByName('KOSIK')).index, 2)
 		assert.deepEqual(state.connected.at(-1), { group: 0, index: 2 })
+	})
+
+	test('picks up a cached column that no longer exists (404) by rescanning', async () => {
+		await client.connectColumnByName('KOSIK') // cached as column 5
+		state.columns[0] = ['KOSIK', 'BLANK'] // column 5 is gone
+		assert.equal((await client.connectColumnByName('KOSIK')).index, 1)
+	})
+
+	test('the LAST press wins when an earlier press is still resolving its name', async () => {
+		await client.connectColumnByName('BLANK') // warm the cache; 5MIN will need a slow rescan
+		state.connected.length = 0
+		state.columns[0] = ['BLANK', 'YTFAST', 'XX', '1MIN', 'KOSIK', '5MIN'] // 5MIN moved: forces a rescan
+		state.delayMs = (method, url) => (method === 'GET' && /\/columns\/6$/.test(url) ? 150 : 0)
+		const first = client.connectColumnByName('5MIN') // slow: rescans up to column 6
+		await new Promise((r) => setTimeout(r, 20))
+		const second = client.connectColumnByName('BLANK') // fast: cached
+		assert.deepEqual(await second, { index: 1, superseded: false })
+		assert.deepEqual(await first, { index: 6, superseded: true })
+		assert.deepEqual(state.connected, [{ group: 0, index: 1 }])
+	})
+
+	test('selects a deck by name, case-insensitively, with one POST', async () => {
+		assert.deepEqual(await client.selectDeckByName('goodfest snv'), { index: 3, superseded: false })
+		assert.deepEqual(state.selectedDecks, [3])
+		assert.ok(state.requests.includes('POST /api/v1/composition/decks/3/select'))
+		for (const r of state.requests) assert.match(r, ALLOWED_REQUEST)
+	})
+
+	test('deck and column presses do not supersede each other', async () => {
+		const [col, deck] = await Promise.all([client.connectColumnByName('5MIN'), client.selectDeckByName('NewLevel 2')])
+		assert.equal(col.superseded, false)
+		assert.equal(deck.superseded, false)
+		assert.deepEqual(state.connected, [{ group: 0, index: 3 }])
+		assert.deepEqual(state.selectedDecks, [2])
 	})
 
 	test('an unknown name throws a ResolumeError naming the column and sends no POST', async () => {
@@ -142,15 +142,27 @@ describe('ResolumeClient against a fake Arena', () => {
 		assert.equal(state.connected.length, 0)
 	})
 
+	test('a layer group that does not exist is reported as such', async () => {
+		await assert.rejects(client.connectColumnByName('YTFAST', 7), /layer group 7 has no columns or does not exist/)
+	})
+
 	test('an HTTP error on connect is reported, not swallowed', async () => {
 		state.connectStatus = 500
 		await assert.rejects(client.connectColumnByName('YTFAST'), /answered HTTP 500/)
 	})
 
+	test('a failed POST does not block later presses', async () => {
+		state.connectStatus = 500
+		await assert.rejects(client.connectColumnByName('YTFAST'))
+		state.connectStatus = 204
+		assert.equal((await client.connectColumnByName('5MIN')).superseded, false)
+		assert.deepEqual(state.connected, [{ group: 0, index: 3 }])
+	})
+
 	test('a wedged Arena fails fast with a timeout instead of hanging the action', async () => {
 		state.hang = true
 		const started = Date.now()
-		await assert.rejects(client.product(), /no answer within 300 ms/)
+		await assert.rejects(client.product(), /GET http:\/\/127\.0\.0\.1:\d+\/api\/v1\/product failed: no answer within 300 ms/)
 		assert.ok(Date.now() - started < 2000)
 	})
 

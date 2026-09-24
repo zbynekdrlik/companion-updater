@@ -10,7 +10,7 @@
  */
 
 const DEFAULT_TIMEOUT_MS = 2000
-const MAX_COLUMNS = 1024
+const MAX_ITEMS = 1024
 
 class ResolumeError extends Error {
 	constructor(message) {
@@ -23,21 +23,59 @@ function normalise(name) {
 	return String(name).trim().toLowerCase()
 }
 
-function namesMatch(actual, wanted) {
-	return actual === wanted || normalise(actual) === normalise(wanted)
+/**
+ * The names a column can be addressed by. Arena shows "#" in a name as the
+ * column number ("Column #" is displayed as "Column 3"), while REST returns
+ * the raw template, so both spellings are accepted.
+ */
+function columnAliases(rawName, index) {
+	const raw = String(rawName)
+	const shown = raw.replace(/#/g, String(index))
+	return shown === raw ? [raw] : [raw, shown]
 }
 
-/** 1-based index of `wanted` in `names`: exact match first, then case-insensitive. */
+/** 'exact' | 'loose' | undefined: how column `index` (raw name `rawName`) matches `wanted`. */
+function columnMatch(rawName, index, wanted) {
+	const w = String(wanted).trim()
+	if (!w) return undefined
+	const aliases = columnAliases(rawName, index)
+	if (aliases.includes(w)) return 'exact'
+	const lw = normalise(w)
+	return aliases.some((a) => normalise(a) === lw) ? 'loose' : undefined
+}
+
+/**
+ * 1-based index of `wanted` in `names` (index 0 = column 1). An exact match
+ * anywhere wins over a case-insensitive one; within each pass the first
+ * column wins. Empty names never match.
+ */
 function findColumnIndex(names, wanted) {
-	const exact = names.indexOf(wanted)
-	if (exact >= 0) return exact + 1
-	const w = normalise(wanted)
-	const loose = names.findIndex((n) => normalise(n) === w)
-	return loose >= 0 ? loose + 1 : undefined
+	for (const kind of ['exact', 'loose']) {
+		for (let i = 0; i < names.length; i++) {
+			if (columnMatch(names[i], i + 1, wanted) === kind) return i + 1
+		}
+	}
+	return undefined
 }
 
-function describeTarget(group) {
-	return group ? `layer group ${group}` : 'the composition'
+/**
+ * A named list in Arena that the module can address by name:
+ * the composition's columns, a layer group's columns, or the decks.
+ */
+function columnsOf(group) {
+	return group
+		? { key: `columns:${group}`, path: `/composition/layergroups/${group}/columns`, what: 'column', where: `layer group ${group}`, verb: 'connect' }
+		: { key: 'columns:0', path: '/composition/columns', what: 'column', where: 'the composition', verb: 'connect' }
+}
+const DECKS = { key: 'decks', path: '/composition/decks', what: 'deck', where: 'the deck list', verb: 'select' }
+
+/** Release the socket of a response whose body we do not need. */
+async function discardBody(res) {
+	try {
+		await res.body?.cancel()
+	} catch {
+		// the body is irrelevant; nothing to do
+	}
 }
 
 class ResolumeClient {
@@ -51,82 +89,146 @@ class ResolumeClient {
 		this.baseUrl = baseUrl.replace(/\/+$/, '')
 		this.timeoutMs = timeoutMs
 		this.fetch = fetchImpl
-		/** group number (0 = composition) -> column names, index 0 = column 1 */
-		this.columnNames = new Map()
+		/** list key -> { list, names } (names: raw, index 0 = item 1) */
+		this.cache = new Map()
+		/** list key -> sequence of the latest press; an older press never overrides a newer one */
+		this.pressSeq = new Map()
+		/** Trigger POSTs are sent strictly one after another, in press order. */
+		this.postChain = Promise.resolve()
 	}
 
-	async request(method, path) {
+	failure(method, path, err) {
+		const reason = err && err.name === 'TimeoutError' ? `no answer within ${this.timeoutMs} ms` : errorText(err)
+		return new ResolumeError(`${method} ${this.baseUrl}/api/v1${path} failed: ${reason}`)
+	}
+
+	/** One request; `read` consumes the response (inside the same timeout and error mapping). */
+	async request(method, path, read) {
 		const url = `${this.baseUrl}/api/v1${path}`
 		try {
-			return await this.fetch(url, { method, signal: AbortSignal.timeout(this.timeoutMs) })
+			const res = await this.fetch(url, { method, signal: AbortSignal.timeout(this.timeoutMs) })
+			return await read(res)
 		} catch (err) {
-			const reason = err && err.name === 'TimeoutError' ? `no answer within ${this.timeoutMs} ms` : errorText(err)
-			throw new ResolumeError(`${method} ${url} failed: ${reason}`)
+			if (err instanceof ResolumeError) throw err
+			throw this.failure(method, path, err)
 		}
 	}
 
 	async product() {
-		const res = await this.request('GET', '/product')
-		if (!res.ok) throw new ResolumeError(`GET /product answered HTTP ${res.status}`)
-		return res.json()
+		return this.request('GET', '/product', async (res) => {
+			if (!res.ok) {
+				await discardBody(res)
+				throw new ResolumeError(`GET /product answered HTTP ${res.status}`)
+			}
+			return res.json()
+		})
 	}
 
-	columnsPath(group) {
-		return group ? `/composition/layergroups/${group}/columns` : '/composition/columns'
+	/** Raw name of one item of `list`, or undefined when it does not exist. */
+	async itemName(list, index) {
+		return this.request('GET', `${list.path}/${index}`, async (res) => {
+			if (res.status === 404) {
+				await discardBody(res)
+				return undefined
+			}
+			if (!res.ok) {
+				await discardBody(res)
+				throw new ResolumeError(`GET ${list.what} ${index} of ${list.where} answered HTTP ${res.status}`)
+			}
+			const item = await res.json()
+			return item && item.name && typeof item.name.value === 'string' ? item.name.value : ''
+		})
 	}
 
-	/** Name of one column, or undefined when the column does not exist. */
-	async columnName(index, group = 0) {
-		const res = await this.request('GET', `${this.columnsPath(group)}/${index}`)
-		if (res.status === 404) return undefined
-		if (!res.ok) throw new ResolumeError(`GET column ${index} of ${describeTarget(group)} answered HTTP ${res.status}`)
-		const column = await res.json()
-		return column && column.name && typeof column.name.value === 'string' ? column.name.value : ''
-	}
-
-	/** Re-read every column name of the composition (group 0) or of one layer group. */
-	async refreshColumnNames(group = 0) {
+	/** Re-read every name of `list`. */
+	async refreshNames(list) {
 		const names = []
-		for (let index = 1; index <= MAX_COLUMNS; index++) {
-			const name = await this.columnName(index, group)
+		for (let index = 1; index <= MAX_ITEMS; index++) {
+			const name = await this.itemName(list, index)
 			if (name === undefined) break
 			names.push(name)
 		}
-		this.columnNames.set(group, names)
+		this.cache.set(list.key, { list, names })
 		return names
 	}
 
+	/** Every list used so far (for background refresh). */
+	knownLists() {
+		return [...this.cache.values()].map((entry) => entry.list)
+	}
+
 	/**
-	 * 1-based index of the column called `name`. A cached index is re-checked
-	 * against that single column first (one tiny request), so renaming or
-	 * moving columns in Arena is picked up without a periodic rescan.
+	 * 1-based index of the item called `name`. A cached index is re-checked
+	 * against that single item first (one tiny request), so renaming or
+	 * moving things in Arena is picked up without waiting for a rescan.
 	 */
-	async resolveColumn(name, group = 0) {
-		const cached = this.columnNames.get(group)
-		const cachedIndex = cached && findColumnIndex(cached, name)
+	async resolve(list, name) {
+		const cached = this.cache.get(list.key)
+		const cachedIndex = cached && findColumnIndex(cached.names, name)
 		if (cachedIndex !== undefined) {
-			const current = await this.columnName(cachedIndex, group)
-			if (current !== undefined && namesMatch(current, name)) return cachedIndex
+			const current = await this.itemName(list, cachedIndex)
+			if (current !== undefined && columnMatch(current, cachedIndex, name)) return cachedIndex
 		}
-		const names = await this.refreshColumnNames(group)
+		const names = await this.refreshNames(list)
+		if (names.length === 0) {
+			throw new ResolumeError(`${list.where} has no ${list.what}s or does not exist`)
+		}
 		const index = findColumnIndex(names, name)
 		if (index === undefined) {
-			throw new ResolumeError(`No column named "${name}" in ${describeTarget(group)} (${names.length} columns checked)`)
+			throw new ResolumeError(`No ${list.what} named "${name}" in ${list.where} (${names.length} ${list.what}s checked)`)
 		}
 		return index
 	}
 
-	/** Short click on a column's connect button (Arena answers 204). */
-	async connectColumn(index, group = 0) {
-		const path = `${this.columnsPath(group)}/${index}/connect`
-		const res = await this.request('POST', path)
-		if (!res.ok) throw new ResolumeError(`POST ${path} answered HTTP ${res.status}`)
+	/** POST .../{index}/connect|select (Arena answers 204). */
+	async trigger(list, index) {
+		const path = `${list.path}/${index}/${list.verb}`
+		await this.request('POST', path, async (res) => {
+			await discardBody(res)
+			if (!res.ok) throw new ResolumeError(`POST ${path} answered HTTP ${res.status}`)
+		})
 	}
 
-	async connectColumnByName(name, group = 0) {
-		const index = await this.resolveColumn(name, group)
-		await this.connectColumn(index, group)
-		return index
+	/**
+	 * Resolve and trigger. If a newer press on the same list started while
+	 * this one was still resolving its name, this press is dropped
+	 * (`superseded: true`) so the operator's LAST press always wins; the POSTs
+	 * themselves are sent in press order.
+	 * @returns {Promise<{index: number, superseded: boolean}>}
+	 */
+	async triggerByName(list, name) {
+		const seq = (this.pressSeq.get(list.key) || 0) + 1
+		this.pressSeq.set(list.key, seq)
+		const index = await this.resolve(list, name)
+		const send = this.postChain.then(async () => {
+			if (seq !== this.pressSeq.get(list.key)) return { index, superseded: true }
+			await this.trigger(list, index)
+			return { index, superseded: false }
+		})
+		this.postChain = send.catch(() => {})
+		return send
+	}
+
+	// Columns (group 0 = the composition's own columns)
+	columnName(index, group = 0) {
+		return this.itemName(columnsOf(group), index)
+	}
+	refreshColumnNames(group = 0) {
+		return this.refreshNames(columnsOf(group))
+	}
+	resolveColumn(name, group = 0) {
+		return this.resolve(columnsOf(group), name)
+	}
+	connectColumn(index, group = 0) {
+		return this.trigger(columnsOf(group), index)
+	}
+	connectColumnByName(name, group = 0) {
+		return this.triggerByName(columnsOf(group), name)
+	}
+
+	// Decks
+	selectDeckByName(name) {
+		return this.triggerByName(DECKS, name)
 	}
 }
 
@@ -136,4 +238,4 @@ function errorText(err) {
 	return cause ? `${err.message} (${cause})` : err.message
 }
 
-module.exports = { ResolumeClient, ResolumeError, findColumnIndex, DEFAULT_TIMEOUT_MS }
+module.exports = { ResolumeClient, ResolumeError, findColumnIndex, columnsOf, DECKS, DEFAULT_TIMEOUT_MS }
