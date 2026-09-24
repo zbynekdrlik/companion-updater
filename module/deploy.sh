@@ -106,7 +106,7 @@ REMOTE
 echo "[4/5] Waiting for Companion to answer on :8000..."
 up=""
 for _ in $(seq 1 90); do
-  if curl -fsS -m 3 -o /dev/null "http://${HOST}:8000/"; then up=1; break; fi
+  if curl -fs -m 3 -o /dev/null "http://${HOST}:8000/"; then up=1; break; fi
   sleep 1
 done
 [ -n "${up}" ] || rollback "Companion did not come back on ${HOST}:8000"
@@ -130,7 +130,7 @@ done
 while IFS= read -r line; do echo "  ${line}"; done <<< "${report}"
 [ -n "${verified}" ] || rollback "not every connection reported its health check within 90 s"
 
-INSTALLED="$(remote "python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")" \
+INSTALLED="$(remote "sudo python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")" \
   || INSTALLED="${VERSION} (manifest not re-read)"
 # Stamp this module as verified; only then drop the previous one.
 if remote "sudo touch '${DEST}/.verified'"; then

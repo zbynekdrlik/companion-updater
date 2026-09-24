@@ -29,3 +29,10 @@ test('manifest is not a prerelease and has the fields Companion requires', () =>
 	}
 	assert.equal(manifest.runtime.api, 'nodejs-ipc')
 })
+
+test('display name differs from the official module, or Companion hides it in "Add connection"', () => {
+	// Companion lists modules as "<manufacturer>: <product>" and merges equal
+	// names: with products ["Arena"] ours was invisible next to resolume-arena.
+	const shown = manifest.products.map((product) => `${manifest.manufacturer}: ${product}`)
+	assert.ok(!shown.includes('Resolume: Arena'), `shown as ${shown.join(', ')}`)
+})
