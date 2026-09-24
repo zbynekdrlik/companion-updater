@@ -105,11 +105,13 @@ REMOTE
 
 echo "[4/5] Waiting for Companion to answer on :8000..."
 up=""
+last_error=""
 for _ in $(seq 1 90); do
-  if curl -fs -m 3 -o /dev/null "http://${HOST}:8000/"; then up=1; break; fi
+  # Quiet while it is still starting; the last error is reported if it never answers.
+  if last_error="$(curl -fsS -m 3 -o /dev/null "http://${HOST}:8000/" 2>&1)"; then up=1; break; fi
   sleep 1
 done
-[ -n "${up}" ] || rollback "Companion did not come back on ${HOST}:8000"
+[ -n "${up}" ] || rollback "Companion did not come back on ${HOST}:8000 (${last_error})"
 
 echo "[5/5] Verifying every ${MODULE_ID} connection ran its first health check..."
 SINCE="$(remote "cat /tmp/${MODULE_ID}-restarted-at")" || rollback "could not read the restart time"
