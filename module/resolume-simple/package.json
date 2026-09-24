@@ -1,6 +1,6 @@
 {
 	"name": "resolume-simple",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Minimal, stable Resolume Arena control for Companion: connect layer-group columns by name, send plain OSC.",
 	"main": "index.js",
 	"type": "commonjs",
