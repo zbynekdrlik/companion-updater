@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run on a rig after a module deploy (as root: reads Companion's DB).
 
-Usage: verify-deploy.py <module-id> <journal-since>
+Usage: verify-deploy.py <module-id> <journal-since> <installed-dir>
 
 Every ENABLED connection of <module-id> must have logged the outcome of its
 first health check since the restart: "Connected to ..." or "Resolume not
@@ -20,7 +20,22 @@ import sqlite3
 import subprocess
 import sys
 
-module_id, since = sys.argv[1], sys.argv[2]
+module_id, since, installed_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+
+# Companion loads every module directory in the extra-module-path; a second
+# directory with the same id (e.g. a backup) would silently replace ours.
+extra_path = installed_dir.rstrip("/").rsplit("/", 1)[0]
+copies = []
+for manifest_path in glob.glob(f"{extra_path}/*/companion/manifest.json"):
+    try:
+        with open(manifest_path) as f:
+            if json.load(f).get("id") == module_id:
+                copies.append(manifest_path.rsplit("/companion/", 1)[0])
+    except (OSError, ValueError):
+        continue
+if copies != [installed_dir.rstrip("/")]:
+    print(f"expected exactly one {module_id} in {extra_path}, found: {sorted(copies)}")
+    sys.exit(2)
 
 CONFIG = "/home/companion/.config/companion-nodejs"
 

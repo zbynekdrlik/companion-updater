@@ -23,6 +23,10 @@ MODULE_ID="resolume-simple"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/${MODULE_ID}"
 DEST="/opt/companion-module-dev/${MODULE_ID}"
+# The fallback copy must live OUTSIDE the extra-module-path: Companion loads
+# every module directory it finds there, and a second copy with the same id
+# silently wins over the new one.
+OLD="/opt/companion-module-backup/${MODULE_ID}"
 SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 
 remote() {
@@ -65,10 +69,10 @@ trap 'sudo systemctl start companion' EXIT
 if [ -f "${DEST}/.verified" ]; then
   # The package never contains .verified: DEST was not replaced yet.
   echo "  ${DEST} is still the verified ${MODULE_ID}; nothing to roll back"
-elif [ -d "${DEST}.old" ]; then
+elif [ -d "${OLD}" ]; then
   sudo systemctl stop companion
   sudo rm -rf "${DEST}"
-  sudo mv "${DEST}.old" "${DEST}"
+  sudo mv "${OLD}" "${DEST}"
   echo "  restored the last verified ${MODULE_ID}"
 else
   echo "  no verified ${MODULE_ID} to restore; ${DEST} left as it is"
@@ -78,7 +82,7 @@ REMOTE
 }
 
 echo "[3/5] Installing into ${DEST} and restarting Companion..."
-# A deploy that passed verification leaves ${DEST}/.verified. ${DEST}.old is
+# A deploy that passed verification leaves ${DEST}/.verified. ${OLD} is
 # always a verified module: the verified one is moved there, an unverified
 # leftover (from a deploy that failed half-way) is simply replaced.
 remote bash -s <<REMOTE || rollback "the install step failed"
@@ -87,15 +91,15 @@ trap 'sudo systemctl start companion' EXIT   # Companion must never stay down
 rm -rf /tmp/${MODULE_ID}-new && mkdir /tmp/${MODULE_ID}-new
 tar -C /tmp/${MODULE_ID}-new -xzf /tmp/${MODULE_ID}.tgz && rm /tmp/${MODULE_ID}.tgz
 sudo chown -R companion:companion /tmp/${MODULE_ID}-new/${MODULE_ID}
-sudo mkdir -p /opt/companion-module-dev
+sudo mkdir -p /opt/companion-module-dev /opt/companion-module-backup
 sudo systemctl stop companion
 if [ -f "${DEST}/.verified" ]; then
-  sudo rm -rf "${DEST}.old"
-  sudo mv "${DEST}" "${DEST}.old"
-elif [ -d "${DEST}.old" ]; then
+  sudo rm -rf "${OLD}"
+  sudo mv "${DEST}" "${OLD}"
+elif [ -d "${OLD}" ]; then
   sudo rm -rf "${DEST}"
 elif [ -d "${DEST}" ]; then
-  sudo mv "${DEST}" "${DEST}.old"
+  sudo mv "${DEST}" "${OLD}"
 fi
 sudo mv /tmp/${MODULE_ID}-new/${MODULE_ID} "${DEST}"
 rm -rf /tmp/${MODULE_ID}-new
@@ -120,7 +124,7 @@ report=""
 deadline=$((SECONDS + 90))
 while [ "${SECONDS}" -lt "${deadline}" ]; do
   set +e
-  report="$(remote "sudo python3 - '${MODULE_ID}' '${SINCE}'" < "${SCRIPT_DIR}/verify-deploy.py")"
+  report="$(remote "sudo python3 - '${MODULE_ID}' '${SINCE}' '${DEST}'" < "${SCRIPT_DIR}/verify-deploy.py")"
   rc=$?
   set -e
   case "${rc}" in
@@ -136,8 +140,8 @@ INSTALLED="$(remote "sudo python3 -c \"import json; print(json.load(open('${DEST
   || INSTALLED="${VERSION} (manifest not re-read)"
 # Stamp this module as verified; only then drop the previous one.
 if remote "sudo touch '${DEST}/.verified'"; then
-  remote "sudo rm -rf '${DEST}.old' /tmp/${MODULE_ID}-restarted-at" || echo "WARN: could not remove ${DEST}.old on ${HOST} (harmless: the stamped module is kept)" >&2
+  remote "sudo rm -rf '${OLD}' /tmp/${MODULE_ID}-restarted-at" || echo "WARN: could not remove ${OLD} on ${HOST} (harmless: the stamped module is kept)" >&2
 else
-  echo "WARN: could not stamp ${DEST} as verified on ${HOST}; ${DEST}.old stays as the fallback" >&2
+  echo "WARN: could not stamp ${DEST} as verified on ${HOST}; ${OLD} stays as the fallback" >&2
 fi
 echo "  ${MODULE_ID} v${INSTALLED} installed on ${HOST}; Companion is up."

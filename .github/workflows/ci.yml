@@ -79,6 +79,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: verify-deploy.py regression tests
+        run: python3 module/verify_deploy_test.py
+
       - name: Shellcheck
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
