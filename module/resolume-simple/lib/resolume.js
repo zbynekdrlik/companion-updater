@@ -140,10 +140,14 @@ class ResolumeClient {
 		})
 	}
 
-	/** Re-read every name of `list`. */
-	async refreshNames(list) {
+	/**
+	 * Re-read every name of `list`. `keepGoing()` is asked before each item so
+	 * a background refresh stops as soon as its owner is gone.
+	 */
+	async refreshNames(list, keepGoing = () => true) {
 		const names = []
 		for (let index = 1; index <= MAX_ITEMS; index++) {
+			if (!keepGoing()) return names
 			const name = await this.itemName(list, index)
 			if (name === undefined) break
 			names.push(name)

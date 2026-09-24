@@ -155,6 +155,16 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		assert.deepEqual(state.requests, [])
 	})
 
+	test('a refresh already scanning stops mid-list when its client is replaced', async () => {
+		const client = instance.client
+		let seen = 0
+		const names = await client.refreshNames(
+			{ key: 'columns:2', path: '/composition/layergroups/2/columns', what: 'column', where: 'layer group 2', verb: 'connect' },
+			() => ++seen <= 1,
+		)
+		assert.deepEqual(names, ['Blank'])
+	})
+
 	test('a superseded press is logged as skipped, not as an error', async () => {
 		instance.client.connectColumnByName = async () => ({ index: 2, superseded: true })
 		await instance.actions.connect_column_by_name.callback({ options: { name: 'ytfast', group: 2 } }, context)

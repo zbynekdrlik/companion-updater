@@ -38,9 +38,10 @@ Behaviour the tests pin down:
 
 - `COMPANION_PASS=… module/deploy.sh <host>` (companion.lan = snv, 100.101.72.101 = pp). It deploys only committed, pushed code.
 - A remote EXIT trap always restarts Companion.
-- `${DEST}.old` is the last VERIFIED module. It is kept until `module/verify-deploy.py` confirms that every enabled resolume-simple connection logged the outcome of its first health check since the restart. Either `Connected to …` or `Resolume not reachable: …` counts, because a switched-off Arena is not a broken module.
+- A deploy that passes verification stamps `${DEST}/.verified`, and `${DEST}.old` is always a verified module. At install time a stamped `DEST` becomes `.old`; an unstamped leftover from a half-failed deploy is simply replaced.
+- Verification (`module/verify-deploy.py`, run as root on the rig, reading the DB of the RUNNING Companion version) requires every enabled resolume-simple connection to log the outcome of its first health check after the restart. Either `Connected to …` or `Resolume not reachable: …` counts, because a switched-off Arena is not a broken module.
 - Any failure (install, restart, verification, unknown DB schema) rolls back to `.old`.
-- The verify script exits 0 (ok), 3 (waiting), 2 (cannot verify) or 4 (module errors logged).
+- The verify script exits 0 (ok), 3 (waiting), 2 (cannot verify), or 4 (module errors logged; only checked when no connection exists).
 - Both rigs launch Companion with `--extra-module-path /opt/companion-module-dev`. The module lives in `/opt/companion-module-dev/resolume-simple`, and connections use module version id `dev`, so version bumps never break a connection's pin.
 - Companion must be restarted to load a new or changed module; the script does it.
 - Resolume snv: `10.77.9.201`, webserver 8090, OSC input 7002. The buttons use layer group 2 ("G# Kontent") names.

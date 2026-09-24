@@ -141,7 +141,7 @@ class ResolumeSimpleInstance extends InstanceBase {
 		for (const list of lists.values()) {
 			if (client !== this.client) return // destroyed or reconfigured meanwhile
 			try {
-				await client.refreshNames(list)
+				await client.refreshNames(list, () => client === this.client)
 			} catch (err) {
 				this.log('debug', `Refreshing ${list.what} names of ${list.where} failed: ${err.message}`)
 			}

@@ -44,7 +44,7 @@ describe('ResolumeClient against a fake Arena', () => {
 			decks: ['NewLevel', 'NewLevel 2', 'GoodFest SNV'],
 		}
 		server = await startFakeArena(state)
-		client = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}/`, timeoutMs: 300 })
+		client = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}/`, timeoutMs: 2000 })
 	})
 
 	afterEach(async () => {
@@ -196,8 +196,9 @@ describe('ResolumeClient against a fake Arena', () => {
 
 	test('a wedged Arena fails fast with a timeout instead of hanging the action', async () => {
 		state.hang = true
+		const quick = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}`, timeoutMs: 300 })
 		const started = Date.now()
-		await assert.rejects(client.product(), /GET http:\/\/127\.0\.0\.1:\d+\/api\/v1\/product failed: no answer within 300 ms/)
+		await assert.rejects(quick.product(), /GET http:\/\/127\.0\.0\.1:\d+\/api\/v1\/product failed: no answer within 300 ms/)
 		assert.ok(Date.now() - started < 2000)
 	})
 

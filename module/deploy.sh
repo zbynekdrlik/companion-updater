@@ -64,18 +64,20 @@ set -eu
 trap 'sudo systemctl start companion' EXIT
 if [ -d "${DEST}.old" ]; then
   sudo systemctl stop companion
-  sudo rm -rf "${DEST}" && sudo mv "${DEST}.old" "${DEST}"
-  echo "  restored the previous ${MODULE_ID}"
+  sudo rm -rf "${DEST}"
+  sudo mv "${DEST}.old" "${DEST}"
+  echo "  restored the last verified ${MODULE_ID}"
 else
-  echo "  no previous ${MODULE_ID} to restore; the new one stays installed"
+  echo "  no verified ${MODULE_ID} to restore; ${DEST} left as it is"
 fi
 REMOTE
   exit 1
 }
 
 echo "[3/5] Installing into ${DEST} and restarting Companion..."
-# ${DEST}.old is the last VERIFIED module: if an earlier deploy failed half-way
-# it is still there, so keep it and replace whatever sits in ${DEST}.
+# A deploy that passed verification leaves ${DEST}/.verified. ${DEST}.old is
+# always a verified module: the verified one is moved there, an unverified
+# leftover (from a deploy that failed half-way) is simply replaced.
 remote bash -s <<REMOTE || rollback "the install step failed"
 set -euo pipefail
 trap 'sudo systemctl start companion' EXIT   # Companion must never stay down
@@ -83,11 +85,19 @@ rm -rf /tmp/${MODULE_ID}-new && mkdir /tmp/${MODULE_ID}-new
 tar -C /tmp/${MODULE_ID}-new -xzf /tmp/${MODULE_ID}.tgz && rm /tmp/${MODULE_ID}.tgz
 sudo chown -R companion:companion /tmp/${MODULE_ID}-new/${MODULE_ID}
 sudo mkdir -p /opt/companion-module-dev
-date -u '+%Y-%m-%d %H:%M:%S UTC' > /tmp/${MODULE_ID}-restarted-at
 sudo systemctl stop companion
-if [ -d "${DEST}.old" ]; then sudo rm -rf "${DEST}"; elif [ -d "${DEST}" ]; then sudo mv "${DEST}" "${DEST}.old"; fi
+if [ -f "${DEST}/.verified" ]; then
+  sudo rm -rf "${DEST}.old"
+  sudo mv "${DEST}" "${DEST}.old"
+elif [ -d "${DEST}.old" ]; then
+  sudo rm -rf "${DEST}"
+elif [ -d "${DEST}" ]; then
+  sudo mv "${DEST}" "${DEST}.old"
+fi
 sudo mv /tmp/${MODULE_ID}-new/${MODULE_ID} "${DEST}"
 rm -rf /tmp/${MODULE_ID}-new
+# The journal window starts only after the old process is gone.
+date -u '+%Y-%m-%d %H:%M:%S UTC' > /tmp/${MODULE_ID}-restarted-at
 REMOTE
 
 echo "[4/5] Waiting for Companion to answer on :8000..."
@@ -101,20 +111,25 @@ done
 echo "[5/5] Verifying every ${MODULE_ID} connection ran its first health check..."
 SINCE="$(remote "cat /tmp/${MODULE_ID}-restarted-at")" || rollback "could not read the restart time"
 verified=""
-for _ in $(seq 1 30); do
+report=""
+deadline=$((SECONDS + 90))
+while [ "${SECONDS}" -lt "${deadline}" ]; do
   set +e
   report="$(remote "sudo python3 - '${MODULE_ID}' '${SINCE}'" < "${SCRIPT_DIR}/verify-deploy.py")"
   rc=$?
   set -e
   case "${rc}" in
     0) verified=1; break ;;
-    3) sleep 2 ;;
-    *) echo "${report}" >&2; rollback "verification failed (exit ${rc})" ;;
+    3|255) sleep 2 ;;   # still waiting, or SSH briefly unavailable
+    *) printf '%s\n' "${report}" >&2; rollback "verification failed (exit ${rc})" ;;
   esac
 done
-echo "${report}" | sed 's/^/  /'
-[ -n "${verified}" ] || rollback "a connection did not report its health check within 60 s"
+while IFS= read -r line; do echo "  ${line}"; done <<< "${report}"
+[ -n "${verified}" ] || rollback "not every connection reported its health check within 90 s"
 
+INSTALLED="$(remote "python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")" \
+  || INSTALLED="${VERSION} (manifest not re-read)"
+# Stamp this module as verified FIRST: from now on it is the one to keep.
+remote "sudo touch '${DEST}/.verified'" || echo "WARN: could not stamp ${DEST} as verified on ${HOST}; the next deploy will keep ${DEST}.old as its fallback" >&2
 remote "sudo rm -rf '${DEST}.old' /tmp/${MODULE_ID}-restarted-at" || echo "WARN: could not remove ${DEST}.old on ${HOST}" >&2
-INSTALLED="$(remote "python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")" || rollback "could not read the installed manifest"
 echo "  ${MODULE_ID} v${INSTALLED} installed on ${HOST}; Companion is up."
