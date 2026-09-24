@@ -22,7 +22,7 @@ Never add a call that fetches `/api/v1/composition` itself. The allowlist `ALLOW
 
 Behaviour the tests pin down:
 
-- The last press wins (per list; a column press and a deck press are independent).
+- The last press wins per list, even if that newer press then fails. Columns and decks have independent POST queues.
 - `#` in an Arena name also matches the number Arena shows for it.
 - An invalid layer group is refused and never falls back to the composition.
 
@@ -37,7 +37,10 @@ Behaviour the tests pin down:
 ## Deploy
 
 - `COMPANION_PASS=… module/deploy.sh <host>` (companion.lan = snv, 100.101.72.101 = pp). It deploys only committed, pushed code.
-- A remote EXIT trap always restarts Companion. The previous module is kept until every enabled resolume-simple connection logs `Connected to` Arena; otherwise the deploy rolls back.
+- A remote EXIT trap always restarts Companion.
+- `${DEST}.old` is the last VERIFIED module. It is kept until `module/verify-deploy.py` confirms that every enabled resolume-simple connection logged the outcome of its first health check since the restart. Either `Connected to …` or `Resolume not reachable: …` counts, because a switched-off Arena is not a broken module.
+- Any failure (install, restart, verification, unknown DB schema) rolls back to `.old`.
+- The verify script exits 0 (ok), 3 (waiting), 2 (cannot verify) or 4 (module errors logged).
 - Both rigs launch Companion with `--extra-module-path /opt/companion-module-dev`. The module lives in `/opt/companion-module-dev/resolume-simple`, and connections use module version id `dev`, so version bumps never break a connection's pin.
 - Companion must be restarted to load a new or changed module; the script does it.
 - Resolume snv: `10.77.9.201`, webserver 8090, OSC input 7002. The buttons use layer group 2 ("G# Kontent") names.

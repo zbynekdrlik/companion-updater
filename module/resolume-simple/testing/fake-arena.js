@@ -39,6 +39,10 @@ function answer(state, req, res) {
 			return res.end('{"error":"Deck not found"}')
 		}
 		if (d[2] && req.method === 'POST') {
+			if (state.connectStatus && state.connectStatus !== 204) {
+				res.writeHead(state.connectStatus)
+				return res.end()
+			}
 			state.selectedDecks = state.selectedDecks || []
 			state.selectedDecks.push(index)
 			res.writeHead(204)

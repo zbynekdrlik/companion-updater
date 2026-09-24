@@ -57,25 +57,9 @@ tar -C "${STAGE}" -czf "${STAGE}/${MODULE_ID}.tgz" "${MODULE_ID}"
 echo "[2/5] Uploading..."
 sshpass -e scp "${SSH_OPTS[@]}" "${STAGE}/${MODULE_ID}.tgz" "${COMPANION_USER}@${HOST}:/tmp/${MODULE_ID}.tgz"
 
-echo "[3/5] Installing into ${DEST} and restarting Companion..."
-remote bash -s <<REMOTE
-set -euo pipefail
-trap 'sudo systemctl start companion' EXIT   # Companion must never stay down
-rm -rf /tmp/${MODULE_ID}-new && mkdir /tmp/${MODULE_ID}-new
-tar -C /tmp/${MODULE_ID}-new -xzf /tmp/${MODULE_ID}.tgz && rm /tmp/${MODULE_ID}.tgz
-sudo chown -R companion:companion /tmp/${MODULE_ID}-new/${MODULE_ID}
-sudo mkdir -p /opt/companion-module-dev
-sudo rm -rf "${DEST}.old"
-sudo systemctl stop companion
-if [ -d "${DEST}" ]; then sudo mv "${DEST}" "${DEST}.old"; fi
-sudo mv /tmp/${MODULE_ID}-new/${MODULE_ID} "${DEST}"
-rm -rf /tmp/${MODULE_ID}-new
-date -u +%Y-%m-%dT%H:%M:%SZ > /tmp/${MODULE_ID}-restarted-at
-REMOTE
-
 rollback() {
   echo "ERROR: $1 — rolling back" >&2
-  remote bash -s <<REMOTE || true
+  remote bash -s <<REMOTE || echo "ERROR: the rollback itself failed — check ${HOST} by hand" >&2
 set -eu
 trap 'sudo systemctl start companion' EXIT
 if [ -d "${DEST}.old" ]; then
@@ -89,6 +73,23 @@ REMOTE
   exit 1
 }
 
+echo "[3/5] Installing into ${DEST} and restarting Companion..."
+# ${DEST}.old is the last VERIFIED module: if an earlier deploy failed half-way
+# it is still there, so keep it and replace whatever sits in ${DEST}.
+remote bash -s <<REMOTE || rollback "the install step failed"
+set -euo pipefail
+trap 'sudo systemctl start companion' EXIT   # Companion must never stay down
+rm -rf /tmp/${MODULE_ID}-new && mkdir /tmp/${MODULE_ID}-new
+tar -C /tmp/${MODULE_ID}-new -xzf /tmp/${MODULE_ID}.tgz && rm /tmp/${MODULE_ID}.tgz
+sudo chown -R companion:companion /tmp/${MODULE_ID}-new/${MODULE_ID}
+sudo mkdir -p /opt/companion-module-dev
+date -u '+%Y-%m-%d %H:%M:%S UTC' > /tmp/${MODULE_ID}-restarted-at
+sudo systemctl stop companion
+if [ -d "${DEST}.old" ]; then sudo rm -rf "${DEST}"; elif [ -d "${DEST}" ]; then sudo mv "${DEST}" "${DEST}.old"; fi
+sudo mv /tmp/${MODULE_ID}-new/${MODULE_ID} "${DEST}"
+rm -rf /tmp/${MODULE_ID}-new
+REMOTE
+
 echo "[4/5] Waiting for Companion to answer on :8000..."
 up=""
 for _ in $(seq 1 90); do
@@ -97,36 +98,23 @@ for _ in $(seq 1 90); do
 done
 [ -n "${up}" ] || rollback "Companion did not come back on ${HOST}:8000"
 
-echo "[5/5] Verifying the module loaded..."
-# Every enabled resolume-simple connection must log "Connected to" after the restart.
-LABELS="$(remote "sudo python3 - <<'PY'
-import glob, json, sqlite3
-dbs = sorted(glob.glob('/home/companion/.config/companion-nodejs/v*/db.sqlite'))
-db = sqlite3.connect('file:' + dbs[-1] + '?mode=ro', uri=True)
-for (value,) in db.execute('select value from instances'):
-    i = json.loads(value)
-    if i.get('moduleId') == '${MODULE_ID}' and i.get('enabled'):
-        print(i.get('label'))
-PY")"
-SINCE="$(remote "cat /tmp/${MODULE_ID}-restarted-at")"
-journal() { remote "journalctl -u companion --since '${SINCE}' --no-pager -o cat"; }
-if [ -z "${LABELS}" ]; then
-  echo "  no ${MODULE_ID} connection configured yet — checking the log for load errors only"
-  sleep 10
-  if journal | grep -iE "${MODULE_ID}" | grep -iE 'error|fail|crash' ; then
-    rollback "Companion logged errors for ${MODULE_ID}"
-  fi
-else
-  for label in ${LABELS}; do
-    ok=""
-    for _ in $(seq 1 30); do
-      if journal | grep -F "Connection/${label}" | grep -q 'Connected to '; then ok=1; break; fi
-      sleep 2
-    done
-    [ -n "${ok}" ] || rollback "connection '${label}' did not report 'Connected to' Arena within 60 s"
-    echo "  connection '${label}' is connected to Arena"
-  done
-fi
-remote "sudo rm -rf '${DEST}.old' /tmp/${MODULE_ID}-restarted-at"
-INSTALLED="$(remote "python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")"
+echo "[5/5] Verifying every ${MODULE_ID} connection ran its first health check..."
+SINCE="$(remote "cat /tmp/${MODULE_ID}-restarted-at")" || rollback "could not read the restart time"
+verified=""
+for _ in $(seq 1 30); do
+  set +e
+  report="$(remote "sudo python3 - '${MODULE_ID}' '${SINCE}'" < "${SCRIPT_DIR}/verify-deploy.py")"
+  rc=$?
+  set -e
+  case "${rc}" in
+    0) verified=1; break ;;
+    3) sleep 2 ;;
+    *) echo "${report}" >&2; rollback "verification failed (exit ${rc})" ;;
+  esac
+done
+echo "${report}" | sed 's/^/  /'
+[ -n "${verified}" ] || rollback "a connection did not report its health check within 60 s"
+
+remote "sudo rm -rf '${DEST}.old' /tmp/${MODULE_ID}-restarted-at" || echo "WARN: could not remove ${DEST}.old on ${HOST}" >&2
+INSTALLED="$(remote "python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")" || rollback "could not read the installed manifest"
 echo "  ${MODULE_ID} v${INSTALLED} installed on ${HOST}; Companion is up."

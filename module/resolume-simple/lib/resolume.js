@@ -93,8 +93,8 @@ class ResolumeClient {
 		this.cache = new Map()
 		/** list key -> sequence of the latest press; an older press never overrides a newer one */
 		this.pressSeq = new Map()
-		/** Trigger POSTs are sent strictly one after another, in press order. */
-		this.postChain = Promise.resolve()
+		/** list key -> promise chain: trigger POSTs of one list go out one after another, in press order */
+		this.postChains = new Map()
 	}
 
 	failure(method, path, err) {
@@ -161,6 +161,9 @@ class ResolumeClient {
 	 * 1-based index of the item called `name`. A cached index is re-checked
 	 * against that single item first (one tiny request), so renaming or
 	 * moving things in Arena is picked up without waiting for a rescan.
+	 * Known limit: if the cached item still matches, a better match added
+	 * elsewhere (an exact spelling, or an earlier duplicate) is only seen after
+	 * the next background refresh (every 30 s, see index.js).
 	 */
 	async resolve(list, name) {
 		const cached = this.cache.get(list.key)
@@ -192,20 +195,25 @@ class ResolumeClient {
 	/**
 	 * Resolve and trigger. If a newer press on the same list started while
 	 * this one was still resolving its name, this press is dropped
-	 * (`superseded: true`) so the operator's LAST press always wins; the POSTs
-	 * themselves are sent in press order.
+	 * (`superseded: true`) so the operator's LAST press always wins, even if
+	 * that newer press then fails. POSTs of one list are sent in press order;
+	 * columns and decks queue independently.
 	 * @returns {Promise<{index: number, superseded: boolean}>}
 	 */
 	async triggerByName(list, name) {
 		const seq = (this.pressSeq.get(list.key) || 0) + 1
 		this.pressSeq.set(list.key, seq)
 		const index = await this.resolve(list, name)
-		const send = this.postChain.then(async () => {
+		const chain = this.postChains.get(list.key) || Promise.resolve()
+		const send = chain.then(async () => {
 			if (seq !== this.pressSeq.get(list.key)) return { index, superseded: true }
 			await this.trigger(list, index)
 			return { index, superseded: false }
 		})
-		this.postChain = send.catch(() => {})
+		this.postChains.set(
+			list.key,
+			send.catch(() => {}),
+		)
 		return send
 	}
 

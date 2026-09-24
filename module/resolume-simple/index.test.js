@@ -138,6 +138,30 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		assert.ok(instance.logs.some(([l, m]) => l === 'error' && /No deck named "Nope Song" in the deck list \(3 decks checked\)/.test(m)))
 	})
 
+	test('the background refresh warms group 2 and every list used, and stops for a replaced client', async () => {
+		await instance.checkHealth()
+		const client = instance.client
+		assert.deepEqual(client.knownLists().map((l) => l.key), ['columns:2']) // warmed on the first healthy check
+		await instance.actions.select_deck_by_name.callback({ options: { name: 'Oceans' } }, context)
+		state.requests.length = 0
+		instance.lastNamesRefresh = 0
+		await instance.refreshNamesIfDue(client)
+		assert.ok(state.requests.includes('GET /api/v1/composition/layergroups/2/columns/1'))
+		assert.ok(state.requests.includes('GET /api/v1/composition/decks/1'))
+		state.requests.length = 0
+		instance.lastNamesRefresh = 0
+		instance.client = null // what destroy() does
+		await instance.refreshNamesIfDue(client)
+		assert.deepEqual(state.requests, [])
+	})
+
+	test('a superseded press is logged as skipped, not as an error', async () => {
+		instance.client.connectColumnByName = async () => ({ index: 2, superseded: true })
+		await instance.actions.connect_column_by_name.callback({ options: { name: 'ytfast', group: 2 } }, context)
+		assert.ok(instance.logs.some(([l, m]) => l === 'info' && /Skipped column "ytfast" \(#2, group 2\): superseded by a newer press/.test(m)))
+		assert.ok(!instance.logs.some(([l]) => l === 'error'))
+	})
+
 	test('send_osc sends through Companion with typed arguments', async () => {
 		await instance.actions.send_osc.callback({ options: { path: '/composition/layers/29/clips/4/video/opacity', type: 'f', value: '0' } }, context)
 		assert.deepEqual(instance.osc, [['127.0.0.1', 7002, '/composition/layers/29/clips/4/video/opacity', [{ type: 'f', value: 0 }]]])

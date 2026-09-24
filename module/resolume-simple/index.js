@@ -139,6 +139,7 @@ class ResolumeSimpleInstance extends InstanceBase {
 		const lists = new Map([[columnsOf(DEFAULT_LAYER_GROUP).key, columnsOf(DEFAULT_LAYER_GROUP)]])
 		for (const list of client.knownLists()) lists.set(list.key, list)
 		for (const list of lists.values()) {
+			if (client !== this.client) return // destroyed or reconfigured meanwhile
 			try {
 				await client.refreshNames(list)
 			} catch (err) {
@@ -168,7 +169,7 @@ class ResolumeSimpleInstance extends InstanceBase {
 			const { index, superseded } = await client.connectColumnByName(name, group)
 			const where = `"${name}" (#${index}, ${group ? `group ${group}` : 'composition'})`
 			if (superseded) {
-				this.log('info', `Skipped column ${where}: a newer press was already sent`)
+				this.log('info', `Skipped column ${where}: superseded by a newer press`)
 			} else {
 				this.log('debug', `Connected column ${where} in ${Date.now() - started} ms`)
 			}
@@ -192,7 +193,7 @@ class ResolumeSimpleInstance extends InstanceBase {
 		try {
 			const { index, superseded } = await client.selectDeckByName(name)
 			if (superseded) {
-				this.log('info', `Skipped deck "${name}" (#${index}): a newer press was already sent`)
+				this.log('info', `Skipped deck "${name}" (#${index}): superseded by a newer press`)
 			} else {
 				this.log('debug', `Selected deck "${name}" (#${index}) in ${Date.now() - started} ms`)
 			}

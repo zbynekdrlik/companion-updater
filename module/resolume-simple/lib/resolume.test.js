@@ -133,6 +133,41 @@ describe('ResolumeClient against a fake Arena', () => {
 		assert.deepEqual(state.selectedDecks, [2])
 	})
 
+	test('the last press wins even when that newer press then fails: nothing is sent', async () => {
+		await client.connectColumnByName('BLANK')
+		state.connected.length = 0
+		state.columns[0] = ['BLANK', 'YTFAST', 'XX', '1MIN', 'KOSIK', '5MIN'] // forces a slow rescan for 5MIN
+		state.delayMs = (method, url) => (method === 'GET' && /\/columns\/6$/.test(url) ? 150 : 0)
+		const first = client.connectColumnByName('5MIN')
+		await new Promise((r) => setTimeout(r, 20))
+		const second = client.connectColumnByName('NO SUCH COLUMN')
+		await assert.rejects(second, /No column named "NO SUCH COLUMN"/)
+		assert.deepEqual(await first, { index: 6, superseded: true })
+		assert.deepEqual(state.connected, [])
+	})
+
+	test('a failed deck select is reported', async () => {
+		state.connectStatus = 500
+		await assert.rejects(client.selectDeckByName('NewLevel'), /POST \/composition\/decks\/1\/select answered HTTP 500/)
+	})
+
+	test('a slow deck select does not hold up a column connect', async () => {
+		state.delayMs = (method, url) => (method === 'POST' && /\/decks\/\d+\/select$/.test(url) ? 250 : 0)
+		const order = []
+		const deck = client.selectDeckByName('NewLevel').then(() => order.push('deck'))
+		await new Promise((r) => setTimeout(r, 30))
+		const col = client.connectColumnByName('5MIN').then(() => order.push('column'))
+		await Promise.all([deck, col])
+		assert.deepEqual(order, ['column', 'deck'])
+	})
+
+	test('knownLists() lists every list used so far', async () => {
+		assert.deepEqual(client.knownLists(), [])
+		await client.connectColumnByName('5min', 2)
+		await client.selectDeckByName('NewLevel')
+		assert.deepEqual(client.knownLists().map((l) => l.key).sort(), ['columns:2', 'decks'])
+	})
+
 	test('an unknown name throws a ResolumeError naming the column and sends no POST', async () => {
 		await assert.rejects(client.connectColumnByName('NOPE'), (err) => {
 			assert.ok(err instanceof ResolumeError)
