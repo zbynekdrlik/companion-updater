@@ -46,7 +46,7 @@ Behaviour the tests pin down:
 - The verify script exits 0 (ok), 3 (waiting), 2 (cannot verify), or 4 (module errors logged; only checked when no connection exists).
 - Both rigs launch Companion with `--extra-module-path /opt/companion-module-dev`. The module lives in `/opt/companion-module-dev/resolume-simple`, and connections use module version id `dev`, so version bumps never break a connection's pin.
 - Companion must be restarted to load a new or changed module; the script does it.
-- Resolume snv: `10.77.9.201`, webserver 8090, OSC input 7002. The buttons use layer group 2 ("G# Kontent") names.
+- Connection hosts are ALWAYS DNS names, never IPs (owner rule). The module resolves the name on every request. Resolume snv: `resolume.lan` (= resolume-snv.lan, 10.77.9.201), webserver 8090, OSC input 7002. The buttons use layer group 2 ("G# Kontent") names.
 - The songs Resolume is `songs-snv.lan` = 10.77.9.212. The AbleSet trigger selects a deck by `$(AbleSet:activeSongName)`.
 - Companion's "Add connection" list shows `<manufacturer>: <product>` and MERGES equal names. With products `["Arena"]` the module was invisible next to the official `Resolume: Arena`, so ours is `Resolume: Arena Simple` (guarded by `lib/package.test.js`). Connections are created in the web UI (MCP cannot create them).
 - MCP `create_button` does not work on Companion 5.0.6 (returns `controlId: null`). Edit existing buttons with `update_button`, and press them through the HTTP API: `POST http://<host>:8000/api/location/<page>/<row>/<col>/press`.
