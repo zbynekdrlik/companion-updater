@@ -62,7 +62,10 @@ rollback() {
   remote bash -s <<REMOTE || echo "ERROR: the rollback itself failed — check ${HOST} by hand" >&2
 set -eu
 trap 'sudo systemctl start companion' EXIT
-if [ -d "${DEST}.old" ]; then
+if [ -f "${DEST}/.verified" ]; then
+  # The package never contains .verified: DEST was not replaced yet.
+  echo "  ${DEST} is still the verified ${MODULE_ID}; nothing to roll back"
+elif [ -d "${DEST}.old" ]; then
   sudo systemctl stop companion
   sudo rm -rf "${DEST}"
   sudo mv "${DEST}.old" "${DEST}"
@@ -129,7 +132,10 @@ while IFS= read -r line; do echo "  ${line}"; done <<< "${report}"
 
 INSTALLED="$(remote "python3 -c \"import json; print(json.load(open('${DEST}/companion/manifest.json'))['version'])\"")" \
   || INSTALLED="${VERSION} (manifest not re-read)"
-# Stamp this module as verified FIRST: from now on it is the one to keep.
-remote "sudo touch '${DEST}/.verified'" || echo "WARN: could not stamp ${DEST} as verified on ${HOST}; the next deploy will keep ${DEST}.old as its fallback" >&2
-remote "sudo rm -rf '${DEST}.old' /tmp/${MODULE_ID}-restarted-at" || echo "WARN: could not remove ${DEST}.old on ${HOST}" >&2
+# Stamp this module as verified; only then drop the previous one.
+if remote "sudo touch '${DEST}/.verified'"; then
+  remote "sudo rm -rf '${DEST}.old' /tmp/${MODULE_ID}-restarted-at" || echo "WARN: could not remove ${DEST}.old on ${HOST} (harmless: the stamped module is kept)" >&2
+else
+  echo "WARN: could not stamp ${DEST} as verified on ${HOST}; ${DEST}.old stays as the fallback" >&2
+fi
 echo "  ${MODULE_ID} v${INSTALLED} installed on ${HOST}; Companion is up."

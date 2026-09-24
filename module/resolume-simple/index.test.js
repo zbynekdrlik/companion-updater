@@ -165,6 +165,20 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		assert.deepEqual(names, ['Blank'])
 	})
 
+	test('refreshNamesIfDue stops mid-scan when the instance is destroyed meanwhile', async () => {
+		const client = instance.client
+		instance.lastNamesRefresh = 0
+		const realItemName = client.itemName.bind(client)
+		let calls = 0
+		client.itemName = async (list, index) => {
+			calls++
+			if (calls === 1) instance.client = null // destroyed while the scan is running
+			return realItemName(list, index)
+		}
+		await instance.refreshNamesIfDue(client)
+		assert.equal(calls, 1)
+	})
+
 	test('a superseded press is logged as skipped, not as an error', async () => {
 		instance.client.connectColumnByName = async () => ({ index: 2, superseded: true })
 		await instance.actions.connect_column_by_name.callback({ options: { name: 'ytfast', group: 2 } }, context)

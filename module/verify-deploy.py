@@ -35,10 +35,12 @@ def active_db():
             return path
     except (OSError, ValueError, KeyError):
         pass
-    def version_key(path):
-        return [int(n) for n in re.findall(r"/v(\d+)\.(\d+)/", path)[0]]
-    dbs = sorted(glob.glob(f"{CONFIG}/v*.*/db.sqlite"), key=version_key)
-    return dbs[-1] if dbs else None
+    versioned = []
+    for path in glob.glob(f"{CONFIG}/v*/db.sqlite"):
+        m = re.search(r"/v(\d+)\.(\d+)/db\.sqlite$", path)
+        if m:
+            versioned.append(((int(m.group(1)), int(m.group(2))), path))
+    return max(versioned)[1] if versioned else None
 
 
 db_path = active_db()
@@ -47,13 +49,19 @@ if not db_path:
     sys.exit(2)
 db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 rows = []
+skipped = 0
 for (value,) in db.execute("select value from instances"):
     try:
         row = json.loads(value)
     except (TypeError, ValueError):
-        continue
+        row = None
     if isinstance(row, dict):
         rows.append(row)
+    else:
+        skipped += 1
+if skipped and not rows:
+    print(f"{db_path}: none of the {skipped} instances rows is a JSON object (unknown Companion DB schema)")
+    sys.exit(2)
 if rows and not any("moduleId" in row for row in rows):
     print(f"{db_path}: instances have no moduleId field (unknown Companion DB schema)")
     sys.exit(2)
