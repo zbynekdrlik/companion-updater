@@ -24,3 +24,6 @@ venv/
 
 # Playwright MCP local cache
 .playwright-mcp/
+
+# Node
+node_modules/

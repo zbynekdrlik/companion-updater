@@ -7,6 +7,7 @@ WASM), the host udev rules and backup pusher (`host/`), and `deploy.sh`.
 ## Playbook router
 
 - updater + deploy (update.sh traps, build order, deploy ordering, hosts) → `.claude/rules/updater.md` (auto-loads on its `paths:`)
+- resolume-simple Companion module (why REST-only, tests, deploy via extra-module-path) → `.claude/rules/module.md` (auto-loads on its `paths:`)
 
 ## Local Build Policy
 

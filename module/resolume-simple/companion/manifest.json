@@ -1,0 +1,22 @@
+{
+	"id": "resolume-simple",
+	"name": "Resolume Simple",
+	"shortname": "resolume-simple",
+	"description": "Minimal, stable Resolume Arena control: connect layer-group columns by name (REST, confirmed) and send plain OSC. No WebSocket, never downloads the composition.",
+	"version": "0.1.0",
+	"license": "MIT",
+	"repository": "git+https://github.com/zbynekdrlik/companion-updater.git",
+	"bugs": "https://github.com/zbynekdrlik/companion-updater/issues",
+	"maintainers": [{ "name": "zbynekdrlik" }],
+	"legacyIds": [],
+	"runtime": {
+		"type": "node22",
+		"api": "nodejs-ipc",
+		"apiVersion": "1.13.6",
+		"entrypoint": "../index.js"
+	},
+	"manufacturer": "Resolume",
+	"products": ["Arena"],
+	"keywords": ["Resolume", "Arena", "OSC", "Column"],
+	"isPrerelease": false
+}
