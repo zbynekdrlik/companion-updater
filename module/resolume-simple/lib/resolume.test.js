@@ -169,6 +169,53 @@ describe('ResolumeClient against a fake Arena', () => {
 		assert.deepEqual(client.knownLists().map((l) => l.key).sort(), ['columns:2', 'decks'])
 	})
 
+	test('connects a layer-group column by number with exactly one POST, no lookup', async () => {
+		assert.deepEqual(await client.connectColumnByNumber(3, 2), { index: 3, superseded: false })
+		assert.deepEqual(state.requests, ['POST /api/v1/composition/layergroups/2/columns/3/connect'])
+		assert.deepEqual(state.connected, [{ group: 2, index: 3 }])
+	})
+
+	test('connects a composition column by number (group 0)', async () => {
+		await client.connectColumnByNumber(5)
+		assert.deepEqual(state.connected, [{ group: 0, index: 5 }])
+	})
+
+	test('a column number that does not exist in Arena is reported, not swallowed', async () => {
+		await assert.rejects(client.connectColumnByNumber(99, 2), /answered HTTP 404/)
+	})
+
+	test('an invalid column number is refused before any request', async () => {
+		for (const bad of [0, -1, 2.5, NaN, '3', undefined]) {
+			await assert.rejects(client.connectColumnByNumber(bad, 2), /column number must be a whole number >= 1/)
+		}
+		assert.deepEqual(state.requests, [])
+	})
+
+	test('an invalid column number does not cancel a valid press already in flight', async () => {
+		await client.connectColumnByName('BLANK')
+		state.connected.length = 0
+		state.columns[0] = ['BLANK', 'YTFAST', 'XX', '1MIN', 'KOSIK', '5MIN']
+		state.delayMs = (method, url) => (method === 'GET' && /\/columns\/6$/.test(url) ? 150 : 0)
+		const valid = client.connectColumnByName('5MIN')
+		await new Promise((r) => setTimeout(r, 20))
+		await assert.rejects(client.connectColumnByNumber(0), /whole number >= 1/)
+		assert.deepEqual(await valid, { index: 6, superseded: false })
+		assert.deepEqual(state.connected, [{ group: 0, index: 6 }])
+	})
+
+	test('by-number and by-name presses share last-press-wins on the same list', async () => {
+		await client.connectColumnByName('BLANK') // warm the cache; 5MIN will need a slow rescan
+		state.connected.length = 0
+		state.columns[0] = ['BLANK', 'YTFAST', 'XX', '1MIN', 'KOSIK', '5MIN']
+		state.delayMs = (method, url) => (method === 'GET' && /\/columns\/6$/.test(url) ? 150 : 0)
+		const first = client.connectColumnByName('5MIN')
+		await new Promise((r) => setTimeout(r, 20))
+		const second = client.connectColumnByNumber(2)
+		assert.deepEqual(await second, { index: 2, superseded: false })
+		assert.deepEqual(await first, { index: 6, superseded: true })
+		assert.deepEqual(state.connected, [{ group: 0, index: 2 }])
+	})
+
 	test('an unknown name throws a ResolumeError naming the column and sends no POST', async () => {
 		await assert.rejects(client.connectColumnByName('NOPE'), (err) => {
 			assert.ok(err instanceof ResolumeError)
@@ -197,10 +244,23 @@ describe('ResolumeClient against a fake Arena', () => {
 
 	test('a wedged Arena fails fast with a timeout instead of hanging the action', async () => {
 		state.hang = true
-		const quick = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}`, timeoutMs: 300 })
+		const quick = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}`, timeoutMs: 300, healthTimeoutMs: 300 })
 		const started = Date.now()
 		await assert.rejects(quick.product(), /GET http:\/\/127\.0\.0\.1:\d+\/api\/v1\/product failed: no answer within 300 ms/)
 		assert.ok(Date.now() - started < 2000)
+	})
+
+	test('health checks use their own short timeout, presses wait longer', async () => {
+		const c = new ResolumeClient({ baseUrl: `http://127.0.0.1:${server.address().port}`, timeoutMs: 1500, healthTimeoutMs: 200 })
+		state.delayMs = () => 500 // Arena stalls for half a second
+		await assert.rejects(c.product(), /no answer within 200 ms/)
+		assert.deepEqual(await c.connectColumnByNumber(2, 2), { index: 2, superseded: false })
+	})
+
+	test('defaults: presses wait up to 5 s, health checks 2 s', () => {
+		const c = new ResolumeClient({ baseUrl: 'http://x' })
+		assert.equal(c.timeoutMs, 5000)
+		assert.equal(c.healthTimeoutMs, 2000)
 	})
 
 	test('an unreachable Arena is reported with the underlying error', async () => {

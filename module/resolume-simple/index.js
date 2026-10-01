@@ -16,6 +16,12 @@ function parseLayerGroup(raw) {
 	return Number(text)
 }
 
+/** Column number option → integer >= 1, or undefined. */
+function parseColumnNumber(raw) {
+	const n = parseLayerGroup(raw)
+	return n !== undefined && n >= 1 ? n : undefined
+}
+
 class ResolumeSimpleInstance extends InstanceBase {
 	constructor(internal) {
 		super(internal)
@@ -23,7 +29,10 @@ class ResolumeSimpleInstance extends InstanceBase {
 		this.healthTimer = null
 		/** The health check currently running: { client, promise } */
 		this.healthRun = null
-		this.requestTimeoutMs = undefined // library default
+		this.requestTimeoutMs = undefined // library defaults (tests shorten them)
+		this.healthTimeoutMs = undefined
+		/** Consecutive failed health checks; the status turns red only from the second one. */
+		this.healthFailures = 0
 		this.lastHealth = null
 		this.lastNamesRefresh = 0
 	}
@@ -86,7 +95,9 @@ class ResolumeSimpleInstance extends InstanceBase {
 		this.client = new ResolumeClient({
 			baseUrl: `http://${host}:${this.config.restPort || 8090}`,
 			timeoutMs: this.requestTimeoutMs,
+			healthTimeoutMs: this.healthTimeoutMs,
 		})
+		this.healthFailures = 0
 		this.lastHealth = null
 		this.lastNamesRefresh = 0
 		this.updateStatus(InstanceStatus.Connecting)
@@ -118,6 +129,7 @@ class ResolumeSimpleInstance extends InstanceBase {
 		try {
 			const p = await client.product()
 			if (client !== this.client) return
+			this.healthFailures = 0
 			if (this.lastHealth !== 'ok') {
 				this.log('info', `Connected to ${p.name} ${p.major}.${p.minor}.${p.micro} at ${client.baseUrl}`)
 			}
@@ -126,6 +138,13 @@ class ResolumeSimpleInstance extends InstanceBase {
 			await this.refreshNamesIfDue(client)
 		} catch (err) {
 			if (client !== this.client) return
+			this.healthFailures++
+			// Arena's webserver stalls for a few seconds while it is busy; one
+			// missed check is not an outage (companion-updater#10).
+			if (this.healthFailures < 2 && this.lastHealth === 'ok') {
+				this.log('debug', `Health check missed once (${err.message}); not reporting yet`)
+				return
+			}
 			if (this.lastHealth !== err.message) this.log('warn', `Resolume not reachable: ${err.message}`)
 			this.lastHealth = err.message
 			this.updateStatus(InstanceStatus.ConnectionFailure, err.message)
@@ -175,6 +194,36 @@ class ResolumeSimpleInstance extends InstanceBase {
 			}
 		} catch (err) {
 			this.log('error', `Connect column "${name}" (${group ? `group ${group}` : 'composition'}) failed: ${err.message}`)
+		}
+	}
+
+	async connectColumnNumberAction(options) {
+		const group = parseLayerGroup(options.group ?? DEFAULT_LAYER_GROUP)
+		const column = parseColumnNumber(options.column)
+		const where = group ? `group ${group}` : 'composition'
+		if (group === undefined) {
+			this.log('error', `Connect column by number: layer group "${options.group}" is not a whole number >= 0`)
+			return
+		}
+		if (column === undefined) {
+			this.log('error', `Connect column by number (${where}): column "${options.column}" is not a whole number >= 1`)
+			return
+		}
+		const client = this.client
+		if (!client) {
+			this.log('error', `Connect column #${column} (${where}): Resolume host is not configured`)
+			return
+		}
+		const started = Date.now()
+		try {
+			const { superseded } = await client.connectColumnByNumber(column, group)
+			if (superseded) {
+				this.log('info', `Skipped column #${column} (${where}): superseded by a newer press`)
+			} else {
+				this.log('debug', `Connected column #${column} (${where}) in ${Date.now() - started} ms`)
+			}
+		} catch (err) {
+			this.log('error', `Connect column #${column} (${where}) failed: ${err.message}`)
 		}
 	}
 
@@ -246,6 +295,31 @@ class ResolumeSimpleInstance extends InstanceBase {
 				],
 				callback: (action, context) => this.connectColumnAction(action.options, context),
 			},
+			connect_column_by_number: {
+				name: 'Connect column by number',
+				description: 'Connects column N of the given layer group (Arena confirms). Use when names are not set or not known.',
+				options: [
+					{
+						type: 'number',
+						id: 'group',
+						label: 'Layer group (0 = whole composition)',
+						default: DEFAULT_LAYER_GROUP,
+						min: 0,
+						max: 999,
+						step: 1,
+					},
+					{
+						type: 'number',
+						id: 'column',
+						label: 'Column number',
+						default: 1,
+						min: 1,
+						max: 9999,
+						step: 1,
+					},
+				],
+				callback: (action) => this.connectColumnNumberAction(action.options),
+			},
 			select_deck_by_name: {
 				name: 'Select deck by name',
 				description: 'Finds the deck by its name and selects it (Arena confirms). Variables allowed, e.g. $(AbleSet:activeSongName).',
@@ -298,6 +372,6 @@ class ResolumeSimpleInstance extends InstanceBase {
 	}
 }
 
-module.exports = { ResolumeSimpleInstance, parseLayerGroup }
+module.exports = { ResolumeSimpleInstance, parseLayerGroup, parseColumnNumber }
 
 runEntrypoint(ResolumeSimpleInstance, [])

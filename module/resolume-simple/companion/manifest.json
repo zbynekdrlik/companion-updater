@@ -3,7 +3,7 @@
 	"name": "Resolume Simple",
 	"shortname": "resolume-simple",
 	"description": "Minimal, stable Resolume Arena control: connect layer-group columns by name (REST, confirmed) and send plain OSC. No WebSocket, never downloads the composition.",
-	"version": "0.1.1",
+	"version": "0.2.0",
 	"license": "MIT",
 	"repository": "git+https://github.com/zbynekdrlik/companion-updater.git",
 	"bugs": "https://github.com/zbynekdrlik/companion-updater/issues",
