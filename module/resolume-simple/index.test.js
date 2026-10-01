@@ -79,6 +79,7 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		server = await startFakeArena(state)
 		instance = new mod.ResolumeSimpleInstance({})
 		instance.requestTimeoutMs = 10000 // behaviour, not timing: a loaded box must not flake these
+		instance.healthTimeoutMs = 10000
 		await instance.init({ host: '127.0.0.1', restPort: server.address().port, oscPort: 7002 })
 	})
 
@@ -260,6 +261,26 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		state.hang = false
 		await instance.checkHealth()
 		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.Ok)
+		// after recovery the counter starts over: a single stall is tolerated again
+		state.hang = true
+		await instance.checkHealth()
+		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.Ok, 'one stall after a recovery must not flap')
+		assert.equal(instance.logs.filter(([l]) => l === 'warn').length, 1)
+	})
+
+	test('at startup the first failed check reports at once (no Ok to protect yet)', async () => {
+		const wedged = await startFakeArena({ columns: {}, hang: true })
+		const fresh = new mod.ResolumeSimpleInstance({})
+		fresh.healthTimeoutMs = 100
+		try {
+			await fresh.init({ host: '127.0.0.1', restPort: wedged.address().port, oscPort: 7002 })
+			await fresh.checkHealth() // joins the check started by init
+			assert.equal(fresh.statuses.at(-1)[0], mod.InstanceStatus.ConnectionFailure)
+			assert.equal(fresh.logs.filter(([l, m]) => l === 'warn' && /not reachable/.test(m)).length, 1)
+		} finally {
+			await fresh.destroy()
+			await stopFakeArena(wedged)
+		}
 	})
 
 	test('without a host the status is BadConfig and actions do nothing', async () => {

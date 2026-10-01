@@ -191,6 +191,18 @@ describe('ResolumeClient against a fake Arena', () => {
 		assert.deepEqual(state.requests, [])
 	})
 
+	test('an invalid column number does not cancel a valid press already in flight', async () => {
+		await client.connectColumnByName('BLANK')
+		state.connected.length = 0
+		state.columns[0] = ['BLANK', 'YTFAST', 'XX', '1MIN', 'KOSIK', '5MIN']
+		state.delayMs = (method, url) => (method === 'GET' && /\/columns\/6$/.test(url) ? 150 : 0)
+		const valid = client.connectColumnByName('5MIN')
+		await new Promise((r) => setTimeout(r, 20))
+		await assert.rejects(client.connectColumnByNumber(0), /whole number >= 1/)
+		assert.deepEqual(await valid, { index: 6, superseded: false })
+		assert.deepEqual(state.connected, [{ group: 0, index: 6 }])
+	})
+
 	test('by-number and by-name presses share last-press-wins on the same list', async () => {
 		await client.connectColumnByName('BLANK') // warm the cache; 5MIN will need a slow rescan
 		state.connected.length = 0
