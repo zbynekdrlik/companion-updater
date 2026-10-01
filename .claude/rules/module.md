@@ -59,3 +59,17 @@ Behaviour the tests pin down:
 - The songs Resolume is `songs-snv.lan` = 10.77.9.212. The AbleSet trigger selects a deck by `$(AbleSet:activeSongName)`.
 - Companion's "Add connection" list shows `<manufacturer>: <product>` and MERGES equal names. With products `["Arena"]` the module was invisible next to the official `Resolume: Arena`, so ours is `Resolume: Arena Simple` (guarded by `lib/package.test.js`). Connections are created in the web UI (MCP cannot create them).
 - MCP `create_button` does not work on Companion 5.0.6 (returns `controlId: null`). Edit existing buttons with `update_button`, and press them through the HTTP API: `POST http://<host>:8000/api/location/<page>/<row>/<col>/press`.
+
+## Reading the rigs' logs
+
+- In `journalctl -u companion` a connection label is followed by an ANSI colour reset (`Instance/Connection/<label>\x1b[0m <message>`). So `grep 'Connection/resolume '` and `journalctl -g 'Connection/x '` match NOTHING. Strip the colour codes first (`sed 's/\x1b\[[0-9;]*m//g'`) and use `grep -a`.
+- A week of journal is several million lines. Run the scan in the background with a generous timeout; a 60 s foreground call times out.
+- Successful presses log at debug, so the journal shows only failures (`… failed`), skipped presses, and health changes.
+- Companion restarts that show `Stopping companion.service … Started` come from deploys (e.g. SSH from dev2), not crashes; see companion-updater#7.
+
+## companion-pp specifics
+
+- Companion 5.0.6 since 2026-10-01. The active DB is `v5.0`; an old `v4.3/db.sqlite` is still on disk, so do not read it by mistake.
+- The pp buttons use `connect_column_by_number` (group 2) because resolume-pp was off at migration time. The same buttons also drive cg Arena (`cg_resolume`, group 1 + layer 13/9 clips); leave those alone.
+- Page 11 r3c0 is an old "reset connections" button pointing at connection ids that no longer exist.
+
