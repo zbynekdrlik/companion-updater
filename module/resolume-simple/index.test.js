@@ -87,8 +87,9 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		await stopFakeArena(server)
 	})
 
-	test('defines the three actions; the layer group defaults to 2', () => {
-		assert.deepEqual(Object.keys(instance.actions).sort(), ['connect_column_by_name', 'select_deck_by_name', 'send_osc'])
+	test('defines the four actions; the layer group defaults to 2', () => {
+		assert.deepEqual(Object.keys(instance.actions).sort(), ['connect_column_by_name', 'connect_column_by_number', 'select_deck_by_name', 'send_osc'])
+		assert.equal(instance.actions.connect_column_by_number.options.find((o) => o.id === 'group').default, 2)
 		const group = instance.actions.connect_column_by_name.options.find((o) => o.id === 'group')
 		assert.equal(group.default, 2)
 		const value = instance.actions.send_osc.options.find((o) => o.id === 'value')
@@ -187,6 +188,36 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		assert.ok(!instance.logs.some(([l]) => l === 'error'))
 	})
 
+	test('connect by number connects column N of layer group 2 with one POST', async () => {
+		await instance.checkHealth() // let the init-time health check (and name warm-up) finish first
+		state.requests.length = 0
+		await instance.actions.connect_column_by_number.callback({ options: { group: 2, column: 3 } }, context)
+		assert.deepEqual(state.connected, [{ group: 2, index: 3 }])
+		// the action itself: exactly one POST, no name lookup (health GETs may interleave)
+		assert.deepEqual(state.requests.filter((r) => r !== 'GET /api/v1/product'), ['POST /api/v1/composition/layergroups/2/columns/3/connect'])
+	})
+
+	test('connect by number refuses a bad column or group and sends nothing', async () => {
+		await instance.checkHealth()
+		state.requests.length = 0
+		await instance.actions.connect_column_by_number.callback({ options: { group: 2, column: 0 } }, context)
+		await instance.actions.connect_column_by_number.callback({ options: { group: '', column: 3 } }, context)
+		assert.deepEqual(state.requests.filter((r) => r.startsWith('POST')), [])
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && /column "0" is not a whole number >= 1/.test(m)))
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && /layer group "" is not a whole number >= 0/.test(m)))
+	})
+
+	test('connect by number reports a column that does not exist in Arena', async () => {
+		await instance.actions.connect_column_by_number.callback({ options: { group: 2, column: 42 } }, context)
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && /Connect column #42 \(group 2\) failed: .*HTTP 404/.test(m)))
+	})
+
+	test('parseColumnNumber accepts only whole numbers >= 1', () => {
+		assert.equal(mod.parseColumnNumber(3), 3)
+		assert.equal(mod.parseColumnNumber('12'), 12)
+		for (const bad of [0, '0', '', 'x', '1.5', -2, undefined]) assert.equal(mod.parseColumnNumber(bad), undefined, String(bad))
+	})
+
 	test('send_osc sends through Companion with typed arguments', async () => {
 		await instance.actions.send_osc.callback({ options: { path: '/composition/layers/29/clips/4/video/opacity', type: 'f', value: '0' } }, context)
 		assert.deepEqual(instance.osc, [['127.0.0.1', 7002, '/composition/layers/29/clips/4/video/opacity', [{ type: 'f', value: 0 }]]])
@@ -202,6 +233,7 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 		const wedged = await startFakeArena({ columns: {}, hang: true })
 		try {
 			instance.requestTimeoutMs = 100
+			instance.healthTimeoutMs = 100
 			await instance.configUpdated({ host: '127.0.0.1', restPort: wedged.address().port, oscPort: 7002 })
 			await instance.checkHealth() // joins the check started by configUpdated
 			await instance.checkHealth()
@@ -212,6 +244,22 @@ describe('ResolumeSimpleInstance against a fake Arena', () => {
 			await instance.destroy()
 			await stopFakeArena(wedged)
 		}
+	})
+
+	test('one failed health check does not turn an Ok connection red; two in a row do', async () => {
+		await instance.checkHealth()
+		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.Ok)
+		state.hang = true
+		instance.client.healthTimeoutMs = 100
+		await instance.checkHealth()
+		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.Ok, 'a single stall must not flap the status')
+		assert.equal(instance.logs.filter(([l]) => l === 'warn').length, 0)
+		await instance.checkHealth()
+		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.ConnectionFailure)
+		assert.equal(instance.logs.filter(([l]) => l === 'warn').length, 1)
+		state.hang = false
+		await instance.checkHealth()
+		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.Ok)
 	})
 
 	test('without a host the status is BadConfig and actions do nothing', async () => {

@@ -9,7 +9,15 @@
  * (companion-updater#10). Every call here touches a single ~2 KB resource.
  */
 
-const DEFAULT_TIMEOUT_MS = 2000
+/**
+ * A press waits up to 5 s for Arena: on companion-snv Arena 7.28 regularly
+ * stalls its webserver for ~3 s (p90 8 s) while it is being used, and a late
+ * press beats a lost one (the last press still wins). Health checks stay at
+ * 2 s; index.js only reports "not reachable" after two failures in a row.
+ * Measurements: companion-updater#10, 2026-10-01.
+ */
+const ACTION_TIMEOUT_MS = 5000
+const HEALTH_TIMEOUT_MS = 2000
 const MAX_ITEMS = 1024
 
 class ResolumeError extends Error {
@@ -82,12 +90,14 @@ class ResolumeClient {
 	/**
 	 * @param {object} opts
 	 * @param {string} opts.baseUrl e.g. http://10.77.9.201:8090
-	 * @param {number} [opts.timeoutMs]
+	 * @param {number} [opts.timeoutMs] per request for presses and name lookups
+	 * @param {number} [opts.healthTimeoutMs] for the /product health check
 	 * @param {typeof fetch} [opts.fetchImpl]
 	 */
-	constructor({ baseUrl, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = globalThis.fetch }) {
+	constructor({ baseUrl, timeoutMs = ACTION_TIMEOUT_MS, healthTimeoutMs = HEALTH_TIMEOUT_MS, fetchImpl = globalThis.fetch }) {
 		this.baseUrl = baseUrl.replace(/\/+$/, '')
 		this.timeoutMs = timeoutMs
+		this.healthTimeoutMs = healthTimeoutMs
 		this.fetch = fetchImpl
 		/** list key -> { list, names } (names: raw, index 0 = item 1) */
 		this.cache = new Map()
@@ -97,31 +107,36 @@ class ResolumeClient {
 		this.postChains = new Map()
 	}
 
-	failure(method, path, err) {
-		const reason = err && err.name === 'TimeoutError' ? `no answer within ${this.timeoutMs} ms` : errorText(err)
+	failure(method, path, err, timeoutMs) {
+		const reason = err && err.name === 'TimeoutError' ? `no answer within ${timeoutMs} ms` : errorText(err)
 		return new ResolumeError(`${method} ${this.baseUrl}/api/v1${path} failed: ${reason}`)
 	}
 
 	/** One request; `read` consumes the response (inside the same timeout and error mapping). */
-	async request(method, path, read) {
+	async request(method, path, read, timeoutMs = this.timeoutMs) {
 		const url = `${this.baseUrl}/api/v1${path}`
 		try {
-			const res = await this.fetch(url, { method, signal: AbortSignal.timeout(this.timeoutMs) })
+			const res = await this.fetch(url, { method, signal: AbortSignal.timeout(timeoutMs) })
 			return await read(res)
 		} catch (err) {
 			if (err instanceof ResolumeError) throw err
-			throw this.failure(method, path, err)
+			throw this.failure(method, path, err, timeoutMs)
 		}
 	}
 
 	async product() {
-		return this.request('GET', '/product', async (res) => {
-			if (!res.ok) {
-				await discardBody(res)
-				throw new ResolumeError(`GET /product answered HTTP ${res.status}`)
-			}
-			return res.json()
-		})
+		return this.request(
+			'GET',
+			'/product',
+			async (res) => {
+				if (!res.ok) {
+					await discardBody(res)
+					throw new ResolumeError(`GET /product answered HTTP ${res.status}`)
+				}
+				return res.json()
+			},
+			this.healthTimeoutMs,
+		)
 	}
 
 	/** Raw name of one item of `list`, or undefined when it does not exist. */
@@ -205,9 +220,28 @@ class ResolumeClient {
 	 * @returns {Promise<{index: number, superseded: boolean}>}
 	 */
 	async triggerByName(list, name) {
+		const seq = this.nextPress(list)
+		const index = await this.resolve(list, name)
+		return this.enqueueTrigger(list, seq, index)
+	}
+
+	/** Trigger item `index` of `list` directly, without a name lookup. */
+	async triggerByIndex(list, index) {
+		if (!Number.isInteger(index) || index < 1) {
+			throw new ResolumeError(`${list.what} number must be a whole number >= 1 (got ${String(index)})`)
+		}
+		const seq = this.nextPress(list)
+		return this.enqueueTrigger(list, seq, index)
+	}
+
+	nextPress(list) {
 		const seq = (this.pressSeq.get(list.key) || 0) + 1
 		this.pressSeq.set(list.key, seq)
-		const index = await this.resolve(list, name)
+		return seq
+	}
+
+	/** Send the POST in press order; drop it if a newer press on this list started meanwhile. */
+	enqueueTrigger(list, seq, index) {
 		const chain = this.postChains.get(list.key) || Promise.resolve()
 		const send = chain.then(async () => {
 			if (seq !== this.pressSeq.get(list.key)) return { index, superseded: true }
@@ -237,6 +271,9 @@ class ResolumeClient {
 	connectColumnByName(name, group = 0) {
 		return this.triggerByName(columnsOf(group), name)
 	}
+	connectColumnByNumber(index, group = 0) {
+		return this.triggerByIndex(columnsOf(group), index)
+	}
 
 	// Decks
 	selectDeckByName(name) {
@@ -250,4 +287,4 @@ function errorText(err) {
 	return cause ? `${err.message} (${cause})` : err.message
 }
 
-module.exports = { ResolumeClient, ResolumeError, findColumnIndex, columnsOf, DECKS, DEFAULT_TIMEOUT_MS }
+module.exports = { ResolumeClient, ResolumeError, findColumnIndex, columnsOf, DECKS, ACTION_TIMEOUT_MS, HEALTH_TIMEOUT_MS }

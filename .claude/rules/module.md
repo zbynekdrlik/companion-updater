@@ -20,11 +20,20 @@ So the module only uses tiny REST calls:
 
 Never add a call that fetches `/api/v1/composition` itself. The allowlist `ALLOWED_REQUEST` in `testing/fake-arena.js` is asserted by the tests, so a new endpoint has to be added there deliberately.
 
+Timeouts (measured, not guessed — #10, 2026-10-01): Arena 7.28 on companion-snv stalled its webserver 708× in a week (median 3 s, p90 8 s) while in use, but answered in about 14 ms when idle. So:
+
+- Presses (and name lookups) wait up to `ACTION_TIMEOUT_MS` = 5 s.
+- The `/product` health check uses 2 s.
+- The status turns red only after 2 consecutive failed checks.
+
+Do not shorten these without new measurements.
+
 Behaviour the tests pin down:
 
 - The last press wins per list, even if that newer press then fails. Columns and decks have independent POST queues.
 - `#` in an Arena name also matches the number Arena shows for it.
 - An invalid layer group is refused and never falls back to the composition.
+- "Connect column by number" (group + N) exists for rigs whose Arena was off at setup time (companion-pp). By-number and by-name presses on the same list share last-press-wins.
 
 ## Layout and tests
 
