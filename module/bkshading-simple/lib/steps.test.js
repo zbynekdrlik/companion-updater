@@ -137,6 +137,11 @@ describe('planStep on the real pp cam6 state', () => {
 		assert.equal(sliderValue(99999, KELVIN_SLIDER), 10000)
 		assert.equal(sliderValue(-80, TINT_SLIDER), -50)
 		assert.equal(sliderValue(2.4, TINT_SLIDER), 2)
+		// ties round up, like the HTML range input
+		assert.equal(sliderValue(5625, KELVIN_SLIDER), 5650)
+		assert.equal(sliderValue(2.5, TINT_SLIDER), 3)
+		// a max off the grid steps down onto the grid
+		assert.equal(sliderValue(10, { min: 0, max: 10, grid: 4 }), 8)
 	})
 
 	test('at the top ISO choice "+" is reported unchanged', () => {

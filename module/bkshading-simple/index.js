@@ -100,6 +100,7 @@ class BkshadingSimpleInstance extends InstanceBase {
 			this.client = null
 			this.controller = null
 			this.updateStatus(InstanceStatus.BadConfig, 'Set the bkshading host')
+			this.publish() // no live values without a service
 			return
 		}
 		this.client = new BkshadingClient({
@@ -201,27 +202,27 @@ class BkshadingSimpleInstance extends InstanceBase {
 		this.setVariableDefinitions(defs)
 	}
 
-	/** Push every variable and re-check every feedback. */
+	/** Push every variable and re-check every feedback. Without a controller (no host) everything is '-'/off. */
 	publish() {
 		const controller = this.controller
-		if (!controller) return
-		const selected = controller.selected
-		const sel = cameraValues(selected ? controller.camera(selected) : undefined)
+		const cameraOf = (id) => (controller && id ? controller.camera(id) : undefined)
+		const selected = controller ? controller.selected : this.selected
+		const sel = cameraValues(cameraOf(selected))
 		const values = {
 			camera: selected || '-',
-			camera_label: selected && controller.camera(selected) ? sel.label : selected || '-',
+			camera_label: cameraOf(selected) ? sel.label : selected || '-',
 			online: sel.online,
 			iso: sel.iso,
 			fnumber: sel.fnumber,
 			kelvin: sel.kelvin,
 			tint: sel.tint,
-			service_version: controller.serviceVersion ?? '-',
+			service_version: controller?.serviceVersion ?? '-',
 		}
 		// A camera that vanished from the answer (or bkshading is down) shows '-'/'off',
 		// never its last values as if it were still live.
-		for (const id of new Set([...this.knownIdList, ...controller.order])) {
+		for (const id of new Set([...this.knownIdList, ...(controller ? controller.order : [])])) {
 			const v = varId(id)
-			const c = cameraValues(controller.camera(id))
+			const c = cameraValues(cameraOf(id))
 			values[`${v}_online`] = c.online
 			for (const k of VALUE_KEYS) values[`${v}_${k}`] = c[k]
 		}
@@ -269,7 +270,7 @@ class BkshadingSimpleInstance extends InstanceBase {
 		try {
 			const result = await this.controller.step(id, param, dir)
 			if (result.unchanged) {
-				this.log('info', `${id} ${param} ${sign}: already at the end (${result.label})`)
+				this.log('info', `${id} ${param} ${sign}: already at the end (camera ${result.from}, limit ${result.label}); nothing sent`)
 			} else {
 				this.log('info', `${id} ${param} ${sign}: ${result.from} -> ${result.label} (${JSON.stringify(result.patch)}, ${result.ms} ms)`)
 			}

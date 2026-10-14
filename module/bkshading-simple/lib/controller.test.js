@@ -2,7 +2,7 @@
 
 const { test, describe, beforeEach, afterEach } = require('node:test')
 const assert = require('node:assert/strict')
-const { BkshadingClient, BkshadingError } = require('./client')
+const { BkshadingClient, BkshadingError, WRITE_TIMEOUT_MS } = require('./client')
 const { ShadingController } = require('./controller')
 const { StepError } = require('./steps')
 const { startFakeBkshading, stopFakeBkshading, ppCam6, offlineCam, unreachableCam } = require('../testing/fake-bkshading')
@@ -44,6 +44,12 @@ describe('BkshadingClient against a fake bkshading', () => {
 		state.hang = true
 		const quick = new BkshadingClient({ baseUrl: `http://127.0.0.1:${server.address().port}`, pollTimeoutMs: 200 })
 		await assert.rejects(quick.cameras(), /no answer within 200 ms/)
+	})
+
+	test('a write waits longer than the service waits for the relay (10 s)', () => {
+		// camera-box bkshading/service/src/aggregator.rs write_client: 10 s total. A write the
+		// service completes must never be reported here as failed (the next step would resend it).
+		assert.ok(WRITE_TIMEOUT_MS > 10000, `WRITE_TIMEOUT_MS=${WRITE_TIMEOUT_MS}`)
 	})
 
 	test('a dead port fails with the connection error', async () => {
@@ -174,12 +180,14 @@ describe('ShadingController', () => {
 	})
 
 	test('each queued step reports the value it stepped from, measured when its turn came', async () => {
+		state.delayMs = (method) => (method === 'PUT' ? 100 : 0)
 		const results = await Promise.all([ctl.step('cam6', 'iso', 1), ctl.step('cam6', 'iso', 1), ctl.step('cam6', 'iso', 1)])
 		assert.deepEqual(
 			results.map((r) => `${r.from}->${r.label}`),
 			['1600->2000', '2000->2500', '2500->3200'],
 		)
-		for (const r of results) assert.ok(Number.isInteger(r.ms) && r.ms >= 0)
+		// Each write took ~100 ms; timed from the press, the 2nd and 3rd would be ~200 and ~300.
+		for (const r of results) assert.ok(Number.isInteger(r.ms) && r.ms >= 90 && r.ms < 190, `ms=${r.ms}`)
 	})
 
 	test('a poll that started after the write takes the camera value', async () => {

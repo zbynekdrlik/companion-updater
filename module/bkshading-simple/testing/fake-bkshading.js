@@ -6,7 +6,8 @@ const http = require('node:http')
  * A real HTTP server shaped like the bkshading service API
  * (camera-box bkshading/service/src/http.rs, v1.7.0-dev.785), for tests.
  *
- *   GET /api/cameras              -> { version, cameras }
+ *   GET /api/cameras              -> { version, cameras } as they were when the
+ *                                    request ARRIVED (a delayed answer is old)
  *   PUT /api/cameras/:id/params   -> applies the absolute values like the relay
  *                                    projection does, answers { ok: true };
  *                                    404 unknown camera, 502 relay down
@@ -23,8 +24,10 @@ function startFakeBkshading(state) {
 		req.on('end', () => {
 			state.requests.push(`${req.method} ${req.url}`)
 			if (state.hang) return // never answer: a wedged service
+			// The service builds its answer from what it knows NOW; a slow answer is old news.
+			const snapshot = req.method === 'GET' ? JSON.stringify({ version: '1.7.0-dev.785', cameras: state.cameras }) : null
 			const delay = state.delayMs ? state.delayMs(req.method, req.url) : 0
-			setTimeout(() => answer(state, req, res, body), delay)
+			setTimeout(() => answer(state, req, res, body, snapshot), delay)
 		})
 	})
 	return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server)))
@@ -35,9 +38,10 @@ function json(res, status, value) {
 	res.end(JSON.stringify(value))
 }
 
-function answer(state, req, res, body) {
+function answer(state, req, res, body, snapshot) {
 	if (req.method === 'GET' && req.url === '/api/cameras') {
-		return json(res, 200, { version: '1.7.0-dev.785', cameras: state.cameras })
+		res.writeHead(200, { 'Content-Type': 'application/json' })
+		return res.end(snapshot)
 	}
 	const m = req.url.match(/^\/api\/cameras\/([^/]+)\/params$/)
 	if (m && req.method === 'PUT') {

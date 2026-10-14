@@ -200,11 +200,37 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		assert.equal(instance.variables.cam6_fnumber, '-')
 	})
 
-	test('a camera that disappears from bkshading shows "-" / off', async () => {
+	test('a camera that disappears from bkshading shows "-" / off, and its variables stay defined', async () => {
 		state.cameras = state.cameras.filter((c) => c.id !== 'cam6')
 		await instance.poll()
 		assert.equal(instance.variables.cam6_iso, '-')
 		assert.equal(instance.variables.cam6_online, 'off')
+		const defined = instance.variableDefs.map((d) => d.variableId)
+		assert.ok(defined.includes('cam6_iso') && defined.includes('cam6_online'), 'buttons using $(...:cam6_iso) must not turn into $(NA)')
+		assert.deepEqual(
+			instance.actions.select_camera.options[0].choices.map((c) => c.id),
+			['cam4', 'handheld-1'],
+		)
+	})
+
+	test('a poll that leaves during a write and answers after it keeps the new value', async () => {
+		// GET answers the state from when it ARRIVED, 150 ms later; the PUT takes 60 ms.
+		state.delayMs = (method) => (method === 'PUT' ? 60 : 150)
+		const press = instance.actions.step.callback({ options: { param: 'iso', direction: 'up', camera: '' } }, context)
+		await new Promise((r) => setTimeout(r, 20))
+		const slowPoll = instance.poll() // leaves now, while the PUT runs; its answer says 1600
+		await press
+		await slowPoll
+		assert.equal(instance.variables.iso, '2000')
+		assert.equal(instance.variables.cam6_iso, '2000')
+	})
+
+	test('a press at the end of the range says so and sends nothing', async () => {
+		state.cameras[0].state.params.kelvin = 2000
+		await instance.poll()
+		await instance.actions.step.callback({ options: { param: 'kelvin', direction: 'down', camera: '' } }, context)
+		assert.deepEqual(state.writes, [])
+		assert.ok(instance.logs.some(([, m]) => m === 'cam6 kelvin -: already at the end (camera 2000K, limit 2500K); nothing sent'))
 	})
 
 	test('fast presses log each real step', async () => {
@@ -215,9 +241,13 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		assert.equal(instance.variables.iso, '3200')
 	})
 
-	test('no host -> BadConfig, and actions log instead of throwing', async () => {
+	test('no host -> BadConfig, values cleared, and actions log instead of throwing', async () => {
 		await instance.configUpdated({ host: '', port: 8770 })
 		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.BadConfig)
+		assert.equal(instance.variables.iso, '-')
+		assert.equal(instance.variables.online, 'off')
+		assert.equal(instance.variables.cam6_iso, '-')
+		assert.equal(instance.variables.camera, 'cam6')
 		await instance.actions.step.callback({ options: { param: 'iso', direction: 'up', camera: '' } }, context)
 		assert.ok(instance.logs.some(([l, m]) => l === 'error' && /bkshading host is not configured/.test(m)))
 	})
