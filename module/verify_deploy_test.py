@@ -52,5 +52,43 @@ class DuplicateModuleCopies(unittest.TestCase):
             self.assertNotIn("expected exactly one", result.stdout)
 
 
+def load_verify():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("verify_deploy", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class HealthOutcomes(unittest.TestCase):
+    """companion-updater#22: the deploy also verifies bkshading-simple, whose
+    first health line is "Connected to bkshading ..." or "bkshading not
+    reachable: ..."; a resolume-only regex would time out every such deploy."""
+
+    def setUp(self):
+        self.verify = load_verify()
+
+    def test_resolume_and_bkshading_outcomes_count(self):
+        lines = [
+            "Instance/Connection/resolume-bridge Connected to Arena 7.22.0 at http://resolume-pp.lan:8090",
+            "Instance/Connection/resolume-songs Resolume not reachable: GET http://songs-snv.lan:8091/api/v1/product failed",
+            "Instance/Connection/bkshading Connected to bkshading 1.7.0-dev.785 at http://strih.lan:8770: cameras cam6",
+            "Instance/Connection/bkshading-off bkshading not reachable: GET http://strih.lan:8770/api/cameras failed",
+        ]
+        self.assertEqual(self.verify.health_outcomes("resolume-bridge", lines), [lines[0].split(" ", 1)[1]])
+        self.assertEqual(self.verify.health_outcomes("resolume-songs", lines), [lines[1].split(" ", 1)[1]])
+        self.assertEqual(self.verify.health_outcomes("bkshading", lines), [lines[2].split(" ", 1)[1]])
+        self.assertEqual(self.verify.health_outcomes("bkshading-off", lines), [lines[3].split(" ", 1)[1]])
+
+    def test_other_log_lines_are_not_a_health_outcome(self):
+        lines = [
+            "Instance/Connection/bkshading Selected camera cam4 (Cam 4): relay not reachable",
+            "Instance/Connection/bkshading cam6 iso + failed: the relay of cam1 is not reachable",
+            "Instance/Connection/bkshading Poll missed once (timeout); not reporting yet",
+            "Instance/Connection/other Connected to Arena 7.22.0",
+        ]
+        self.assertEqual(self.verify.health_outcomes("bkshading", lines), [])
+
+
 if __name__ == "__main__":
     unittest.main()
