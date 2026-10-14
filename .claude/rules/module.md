@@ -62,6 +62,12 @@ Behaviour the tests pin down:
 - Companion's "Add connection" list shows `<manufacturer>: <product>` and MERGES equal names. With products `["Arena"]` the module was invisible next to the official `Resolume: Arena`, so ours is `Resolume: Arena Simple` (guarded by `lib/package.test.js`). Connections are created in the web UI (MCP cannot create them).
 - **Entity ids: always take them LIVE from MCP `get_button`, never from `db.sqlite`.** After a Companion restart the action/feedback ids in memory differ from the DB until that control is next saved. `update_entity_options` / `remove_entity` with a stale id return `success: true` and change NOTHING. This caught three snv preach-limit fixes on 2026-10-01 (#17). Verify every edit by a DB read-back after it.
 - MCP `create_button` does not work on Companion 5.0.6 (returns `controlId: null`). Edit existing buttons with `update_button`, and press them through the HTTP API: `POST http://<host>:8000/api/location/<page>/<row>/<col>/press`.
+- Companion 5.0.7 buttons are LAYERED (`button-layered`). MCP `update_button` `set_style` fails with `No "mutation"-procedure on path "controls.setStyleFields"`, and `create_button` is still unusable, so buttons are made in the web UI. Build a page like this (done for page 33 "grading kamera", #22):
+  0. Use an existing empty page: pages 1–99 always exist, and the unused ones are named "PAGE". Check that nothing references it (`set_page`, `<page>/r/c` locations). Its default page-up/number/down buttons sit in column 0; remove them with MCP `delete_button` if you need that column.
+  1. Create each button in the web UI: `http://<host>:8000/buttons/<page>`, click the cell titled `<page>/<row>/<col>`, then click "Regular button". The Playwright tool `browser_run_code_unsafe` can loop over the cells.
+  2. Set the text in Style → "Button text string". `\n` is a new line and `$(label:var)` works. "Text Size" is a percentage: at 100 (also at 60 and 35), a 6–7-letter word wraps mid-word on a 72 px key; 24 % fits.
+  3. Add actions with MCP `update_button` `add_action`. It returns the `entityId`, which the MCP op `update_entity_options` then takes.
+  4. Read every result back from `db.sqlite`; the text is in `style.layers[type=text].text.value`. Read only text and options there: entity ids still come from MCP, as said above.
 
 ## Reading the rigs' logs
 
