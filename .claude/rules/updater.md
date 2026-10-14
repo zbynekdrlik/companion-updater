@@ -64,3 +64,14 @@ value in `updater_version`.
 - `companion.lan` = companion-snv (x86_64), `companion-pp.lan` = the PP rig.
 - Companion UI on `:8000`, updater dashboard on `:8081`.
 - SSH user `newlevel` (password auth via `sshpass`; the value is not committed).
+
+## Time sync
+
+`deploy.sh` step 3 runs `host/ensure-timesync.sh`. It runs `timedatectl set-ntp true` and fails unless the clock reports `NTPSynchronized=yes`. timesyncd was disabled on both rigs out of the box (#19).
+
+The NTP server comes from DHCP:
+
+- pp uses `10.77.8.1`, its router.
+- snv uses `strih.lan` (10.77.9.202), which itself runs about 0.9 s off.
+
+"Synchronised" only means synchronised to that server. Measure the real offset with an SNTP query to `pool.ntp.org`, not with `timedatectl`.
