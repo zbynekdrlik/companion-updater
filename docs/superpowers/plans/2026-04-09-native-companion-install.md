@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-09-native-companion-install-design.md`
 
-**SSH access:** `sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan`
+**SSH access:** `sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan`
 
 ---
 
@@ -21,14 +21,14 @@
 - [ ] **Step 1: Back up Companion config**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo cp -a /opt/companion/v4.1 /opt/companion-config-backup-v4.1"
 ```
 
 - [ ] **Step 2: Save the Cloudflare tunnel token**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "cat /opt/companion-docker/.env"
 ```
 
@@ -37,7 +37,7 @@ Save the `CLOUDFLARE_TUNNEL_TOKEN=...` value â€” it will be needed in Task 5.
 - [ ] **Step 3: Verify backup exists**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "ls -la /opt/companion-config-backup-v4.1/"
 ```
 
@@ -52,14 +52,14 @@ Expected: directory listing with `db.sqlite`, `modules/`, `surfaces/`, `backups/
 - [ ] **Step 1: Stop the Docker Companion container (NOT the updater)**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "cd /opt/companion-docker && docker compose down"
 ```
 
 - [ ] **Step 2: Verify port 8000 is free**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "ss -tlnp | grep 8000 || echo 'Port 8000 is free'"
 ```
 
@@ -68,7 +68,7 @@ Expected: `Port 8000 is free`
 - [ ] **Step 3: Verify updater is still running**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "docker ps --format '{{.Names}} {{.Status}}' | grep updater"
 ```
 
@@ -83,7 +83,7 @@ Expected: `companion-updater Up ...`
 - [ ] **Step 1: Run the companion-pi installer**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "curl -s https://raw.githubusercontent.com/bitfocus/companion-pi/main/install.sh | sudo bash"
 ```
 
@@ -100,7 +100,7 @@ Wait for the script to complete (may take a few minutes).
 - [ ] **Step 2: Verify the service is installed**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "systemctl status companion --no-pager"
 ```
 
@@ -109,7 +109,7 @@ Expected: `Active: active (running)` or similar.
 - [ ] **Step 3: Verify config was preserved**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "ls /opt/companion/v4.1/db.sqlite && echo 'Config preserved'"
 ```
 
@@ -117,7 +117,7 @@ Expected: `Config preserved`
 
 If config was overwritten, restore from backup:
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo systemctl stop companion && sudo cp -a /opt/companion-config-backup-v4.1 /opt/companion/v4.1 && sudo systemctl start companion"
 ```
 
@@ -126,7 +126,7 @@ sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
 The service runs as the `companion` user. Ensure it owns the config:
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo chown -R companion:companion /opt/companion/v4.1"
 ```
 
@@ -145,7 +145,7 @@ Expected: `200`
 - [ ] **Step 2: Check udev rules are installed**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "ls /etc/udev/rules.d/50-companion*.rules /etc/udev/rules.d/99-nldevicessetup.rules 2>/dev/null"
 ```
 
@@ -154,14 +154,14 @@ Expected: at least `50-companion.rules` or `50-companion-headless.rules`, plus `
 If the companion-pi rules are missing, install our custom ones:
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo cp /etc/udev/rules.d/50-elgato.rules /etc/udev/rules.d/50-elgato.rules.bak 2>/dev/null; sudo udevadm control --reload-rules && sudo udevadm trigger"
 ```
 
 - [ ] **Step 3: Check Stream Deck is detected**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "lsusb | grep 0fd9"
 ```
 
@@ -170,7 +170,7 @@ Expected: `Elgato` device listed.
 - [ ] **Step 4: Check Companion logs for surface detection**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo journalctl -u companion --no-pager --since '5 minutes ago' | grep -i -E 'surface|stream|deck|hid|usb' | tail -20"
 ```
 
@@ -179,7 +179,7 @@ Expected: Log lines showing the Stream Deck was detected (e.g., `Elgato Stream D
 - [ ] **Step 5: Verify mDNS is working**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "systemctl is-active avahi-daemon"
 ```
 
@@ -187,7 +187,7 @@ Expected: `active`
 
 If not running:
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo apt-get install -y avahi-daemon libnss-mdns && sudo systemctl enable --now avahi-daemon"
 ```
 
@@ -210,7 +210,7 @@ Expected: Returns the list of connections (propresenter, OBS instances, etc.) â€
 - [ ] **Step 1: Install cloudflared on the host**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo mkdir -p --mode=0755 /usr/share/keyrings && \
    sudo curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg -o /usr/share/keyrings/cloudflare-main.gpg && \
    echo 'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' | sudo tee /etc/apt/sources.list.d/cloudflared.list && \
@@ -222,7 +222,7 @@ sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
 Use the tunnel token saved in Task 1, Step 2:
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "sudo cloudflared service install <TUNNEL_TOKEN>"
 ```
 
@@ -231,7 +231,7 @@ Replace `<TUNNEL_TOKEN>` with the actual token from `/opt/companion-docker/.env`
 - [ ] **Step 3: Verify tunnel is running**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "systemctl status cloudflared --no-pager | head -10"
 ```
 
@@ -278,7 +278,7 @@ set -euo pipefail
 
 COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
 COMPANION_USER="${COMPANION_USER:-newlevel}"
-COMPANION_PASS="${COMPANION_PASS:-newlevel}"
+COMPANION_PASS="${COMPANION_PASS:?set COMPANION_PASS}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

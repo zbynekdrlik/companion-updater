@@ -12,7 +12,7 @@
 
 **Target host:** companion.lan (Ubuntu 24.04 x86_64). Build locally on the same arch — no cross-compilation needed.
 
-**SSH access:** `sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan "<command>"`
+**SSH access:** `sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan "<command>"`
 
 ---
 
@@ -29,7 +29,7 @@
 - [ ] **Step 1: Stop the Docker updater on companion.lan**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "cd /opt/companion-updater && docker compose down 2>&1; docker rm -f companion-updater 2>&1 || true"
 ```
 
@@ -1962,7 +1962,7 @@ set -euo pipefail
 
 COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
 COMPANION_USER="${COMPANION_USER:-newlevel}"
-COMPANION_PASS="${COMPANION_PASS:-newlevel}"
+COMPANION_PASS="${COMPANION_PASS:?set COMPANION_PASS}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -2105,7 +2105,7 @@ Expected: All 7 steps complete, final URLs printed.
 - [ ] **Step 2: Verify systemd service is active**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion.lan \
   "systemctl status companion-updater --no-pager | head -10"
 ```
 

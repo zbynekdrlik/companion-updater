@@ -72,7 +72,7 @@ A bash script in the repo root that deploys everything to `companion.lan` via SS
 **Configuration** (environment variables with defaults):
 - `COMPANION_HOST` — target hostname (default: `companion.lan`)
 - `COMPANION_USER` — SSH user (default: `newlevel`)
-- `COMPANION_PASS` — SSH password (default: `newlevel`)
+- `COMPANION_PASS` — SSH password (required; never committed)
 
 **Steps:**
 1. Validate connection to target host

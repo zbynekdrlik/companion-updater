@@ -56,11 +56,11 @@ When an update is triggered it:
 Deploy to `companion.lan` (or any target host) over SSH:
 
 ```bash
-# Default: deploys to companion.lan as newlevel
-./deploy.sh
+# Deploys to companion.lan as newlevel; the SSH password is required and never committed
+COMPANION_PASS=... ./deploy.sh
 
-# Override target host, user, or password
-COMPANION_HOST=10.0.0.50 COMPANION_USER=admin COMPANION_PASS=secret ./deploy.sh
+# Other target host or user
+COMPANION_HOST=companion-pp.lan COMPANION_USER=admin COMPANION_PASS=... ./deploy.sh
 ```
 
 The deploy script:
