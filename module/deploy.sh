@@ -1,9 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy the resolume-simple Companion module to one rig.
-# Usage: COMPANION_PASS=... module/deploy.sh <host>
+# Deploy one of our Companion modules to one rig.
+# Usage: COMPANION_PASS=... module/deploy.sh <host> [module-id]
 #   hosts: companion.lan (snv), 100.101.72.101 (pp)
+#   module-id: a directory under module/ (default: resolume-simple)
 #
 # Both rigs run Companion with --extra-module-path /opt/companion-module-dev,
 # so the module is loaded from there with the stable version id "dev" and a
@@ -14,14 +15,22 @@ set -euo pipefail
 # previous module is kept until the new one is verified, and a failed
 # verification rolls back to it.
 
-HOST="${1:?usage: COMPANION_PASS=... module/deploy.sh <host>}"
+HOST="${1:?usage: COMPANION_PASS=... module/deploy.sh <host> [module-id]}"
+MODULE_ID="${2:-resolume-simple}"
 COMPANION_USER="${COMPANION_USER:-newlevel}"
 : "${COMPANION_PASS:?set COMPANION_PASS (SSH password of ${COMPANION_USER})}"
 export SSHPASS="${COMPANION_PASS}"   # sshpass -e: keeps the password off the command line
 
-MODULE_ID="resolume-simple"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/${MODULE_ID}"
+if [[ ! "${MODULE_ID}" =~ ^[a-z0-9-]+$ ]] || [ ! -f "${SRC}/companion/manifest.json" ]; then
+  echo "ERROR: \"${MODULE_ID}\" is not one of our Companion modules (module/<id>/companion/manifest.json)" >&2
+  exit 1
+fi
+if [ "$(node -p "require('${SRC}/companion/manifest.json').id")" != "${MODULE_ID}" ]; then
+  echo "ERROR: ${SRC}/companion/manifest.json id is not ${MODULE_ID}" >&2
+  exit 1
+fi
 DEST="/opt/companion-module-dev/${MODULE_ID}"
 # The fallback copy must live OUTSIDE the extra-module-path: Companion loads
 # every module directory it finds there, and a second copy with the same id
@@ -55,7 +64,8 @@ cp "${SRC}/index.js" "${SRC}/package.json" "${SRC}/package-lock.json" "${PKG}/"
 cp -r "${SRC}/companion" "${SRC}/lib" "${PKG}/"
 find "${PKG}/lib" -name '*.test.js' -delete
 (cd "${PKG}" && npm ci --omit=dev --no-audit --no-fund --loglevel=error)
-(cd "${PKG}" && node -e "require('./lib/resolume'); require('./lib/osc')")
+# Every lib file must load with only the production dependencies.
+(cd "${PKG}" && node -e "for (const f of require('fs').readdirSync('lib')) require('./lib/' + f)")
 tar -C "${STAGE}" -czf "${STAGE}/${MODULE_ID}.tgz" "${MODULE_ID}"
 
 echo "[2/5] Uploading..."

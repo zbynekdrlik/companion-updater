@@ -1,0 +1,22 @@
+{
+	"id": "bkshading-simple",
+	"name": "bkshading Simple",
+	"shortname": "bkshading-simple",
+	"description": "Camera shading through the bkshading service: +/- steps of ISO, aperture, white balance and tint, exactly like the bkshading panel.",
+	"version": "0.1.0",
+	"license": "MIT",
+	"repository": "git+https://github.com/zbynekdrlik/companion-updater.git",
+	"bugs": "https://github.com/zbynekdrlik/companion-updater/issues",
+	"maintainers": [{ "name": "zbynekdrlik" }],
+	"legacyIds": [],
+	"runtime": {
+		"type": "node22",
+		"api": "nodejs-ipc",
+		"apiVersion": "1.13.6",
+		"entrypoint": "../index.js"
+	},
+	"manufacturer": "NewLevel",
+	"products": ["bkshading Camera Shading"],
+	"keywords": ["bkshading", "Blackmagic", "BMPCC", "Camera", "Shading", "ISO", "Iris", "White balance", "Tint"],
+	"isPrerelease": false
+}
