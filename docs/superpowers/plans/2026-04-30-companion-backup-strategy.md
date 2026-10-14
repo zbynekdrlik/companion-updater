@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-04-30-companion-backup-strategy-design.md`
 
-**SSH access:** `sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@<host>` where `<host>` is `companion.lan` (SNV) or `companion-pp.lan` (PP).
+**SSH access:** `sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@<host>` where `<host>` is `companion.lan` (SNV) or `companion-pp.lan` (PP).
 
 **Branch policy:** Work on `dev` (already current).
 
@@ -1824,7 +1824,7 @@ git commit -m "Route upgrades through updater safety gate; install backup pusher
 - [ ] **Step 1: Run setup-backup-key.sh on companion-pp.lan**
 
 ```bash
-sshpass -p 'newlevel' ssh -t -o StrictHostKeyChecking=no newlevel@companion-pp.lan "sudo /usr/local/sbin/setup-backup-key.sh"
+sshpass -p "$COMPANION_PASS" ssh -t -o StrictHostKeyChecking=no newlevel@companion-pp.lan "sudo /usr/local/sbin/setup-backup-key.sh"
 ```
 
 Wait — this is the FIRST deploy, so `setup-backup-key.sh` doesn't exist on the host yet. We need to deploy first (which copies the script), then run setup-backup-key, then the timer can be enabled. Run this sequence:
@@ -1836,7 +1836,7 @@ COMPANION_HOST=companion-pp.lan ./deploy.sh
 # (because /etc/default/companion-backup-push doesn't exist yet).
 
 # Now run the one-time setup interactively (it pauses for the user to add the deploy key on GitHub):
-sshpass -p 'newlevel' ssh -t -o StrictHostKeyChecking=no newlevel@companion-pp.lan "sudo /usr/local/sbin/setup-backup-key.sh"
+sshpass -p "$COMPANION_PASS" ssh -t -o StrictHostKeyChecking=no newlevel@companion-pp.lan "sudo /usr/local/sbin/setup-backup-key.sh"
 # Copy the printed public key to https://github.com/zbynekdrlik/companion-backups/settings/keys
 # (allow write access). Press ENTER on the SSH session to continue.
 # The script clones the repo, writes /etc/default/companion-backup-push, and enables the timer.
@@ -1850,7 +1850,7 @@ Expected: First deploy completes, including the safety-gated update which is a n
 - [ ] **Step 2: Manually trigger the timer to verify push works**
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion-pp.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion-pp.lan \
   "sudo systemctl start companion-backup-push.service && sleep 5 && sudo journalctl -u companion-backup-push.service -n 30 --no-pager"
 ```
 
@@ -1869,7 +1869,7 @@ Expected: returns a file blob with size > 100000.
 The deploy in Step 1 already triggered an upgrade through the gate. Verify the journal:
 
 ```bash
-sshpass -p 'newlevel' ssh -o StrictHostKeyChecking=no newlevel@companion-pp.lan \
+sshpass -p "$COMPANION_PASS" ssh -o StrictHostKeyChecking=no newlevel@companion-pp.lan \
   "sudo journalctl -u companion-updater -n 100 --no-pager | grep -E 'safety_pre|safety_post|complete' | tail -5"
 ```
 
@@ -1884,7 +1884,7 @@ Expected: shows `safety_pre`, `safety_post`, and `complete` events logged in ord
 ```bash
 cd /home/newlevel/devel/companion
 ./deploy.sh   # default host is companion.lan
-sshpass -p 'newlevel' ssh -t -o StrictHostKeyChecking=no newlevel@companion.lan "sudo /usr/local/sbin/setup-backup-key.sh"
+sshpass -p "$COMPANION_PASS" ssh -t -o StrictHostKeyChecking=no newlevel@companion.lan "sudo /usr/local/sbin/setup-backup-key.sh"
 # Add the printed key to GitHub deploy keys. Press ENTER.
 ```
 
