@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Deploy companion stack to remote host via SSH
-# Usage: ./deploy.sh
+# Usage: COMPANION_PASS=... ./deploy.sh
 # Configuration via environment variables (see defaults below)
 #
 # Architecture:
@@ -12,7 +12,7 @@ set -euo pipefail
 
 COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
 COMPANION_USER="${COMPANION_USER:-newlevel}"
-COMPANION_PASS="${COMPANION_PASS:-newlevel}"
+COMPANION_PASS="${COMPANION_PASS:?set COMPANION_PASS to the SSH password of ${COMPANION_USER}@${COMPANION_HOST}}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -30,7 +30,7 @@ echo "=== Deploying to ${COMPANION_HOST} ==="
 echo ""
 
 # Step 1: Validate connection
-echo "[1/7] Testing connection to ${COMPANION_HOST}..."
+echo "[1/8] Testing connection to ${COMPANION_HOST}..."
 if ! remote "echo ok" >/dev/null 2>&1; then
   echo "ERROR: Cannot connect to ${COMPANION_USER}@${COMPANION_HOST}"
   exit 1
@@ -38,7 +38,7 @@ fi
 echo "  Connected."
 
 # Step 2: Install udev rules
-echo "[2/7] Installing udev rules..."
+echo "[2/8] Installing udev rules..."
 for rule_file in "${SCRIPT_DIR}"/host/*.rules; do
   if [ -f "${rule_file}" ]; then
     rule_name="$(basename "${rule_file}")"
@@ -50,8 +50,15 @@ done
 remote "sudo udevadm control --reload-rules && sudo udevadm trigger"
 echo "  Udev rules reloaded."
 
-# Step 3: Install backup pusher (script + systemd units; deploy key set up separately)
-echo "[3/7] Installing backup pusher..."
+# Step 3: Enable NTP time sync (companion-updater#19: timesyncd was disabled and
+# the clock drifted). Fails the deploy when the clock does not synchronise.
+echo "[3/8] Enabling time sync..."
+remote_copy "${SCRIPT_DIR}/host/ensure-timesync.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/ensure-timesync.sh"
+remote "sudo install -m 0755 /tmp/ensure-timesync.sh /usr/local/sbin/ensure-timesync.sh && rm /tmp/ensure-timesync.sh"
+remote "sudo /usr/local/sbin/ensure-timesync.sh"
+
+# Step 4: Install backup pusher (script + systemd units; deploy key set up separately)
+echo "[4/8] Installing backup pusher..."
 remote_copy "${SCRIPT_DIR}/host/companion-backup-push.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-backup-push.sh"
 remote "sudo install -m 0755 /tmp/companion-backup-push.sh /usr/local/bin/companion-backup-push.sh && rm /tmp/companion-backup-push.sh"
 remote_copy "${SCRIPT_DIR}/host/companion-backup-push.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-backup-push.service"
@@ -71,8 +78,8 @@ else
   echo "  Then re-run this deploy or:  sudo systemctl enable --now companion-backup-push.timer"
 fi
 
-# Step 4: Build companion-updater binary locally
-echo "[4/7] Building companion-updater..."
+# Step 5: Build companion-updater binary locally
+echo "[5/8] Building companion-updater..."
 "${SCRIPT_DIR}/updater/build.sh"
 BIN="${SCRIPT_DIR}/updater/target/release/companion-updater"
 if [ ! -x "${BIN}" ]; then
@@ -80,13 +87,13 @@ if [ ! -x "${BIN}" ]; then
   exit 1
 fi
 
-# Step 5: Deploy companion-updater binary and systemd unit
+# Step 6: Deploy companion-updater binary and systemd unit
 #
 # The binary is deployed BEFORE the Companion upgrade is triggered, so the
 # upgrade always runs through the code in THIS checkout. Doing it the other way
 # round meant a deploy could never fix a bug in the upgrade path itself — the
 # old binary ran the upgrade, and the fix only took effect a deploy later.
-echo "[5/7] Deploying companion-updater..."
+echo "[6/8] Deploying companion-updater..."
 remote "sudo systemctl stop companion-updater 2>/dev/null || true"
 remote_copy "${BIN}" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater"
 remote "sudo install -m 0755 /tmp/companion-updater /usr/local/bin/companion-updater && rm /tmp/companion-updater"
@@ -103,8 +110,8 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 
-# Step 6: Update Companion through the safety-gated updater endpoint.
-echo "[6/7] Updating Companion via companion-updater (safety-gated)..."
+# Step 7: Update Companion through the safety-gated updater endpoint.
+echo "[7/8] Updating Companion via companion-updater (safety-gated)..."
 # Stream the SSE update endpoint. We grep for the first terminal event in the
 # stream: complete = success, safety_rollback = data loss + auto-reverted,
 # error = anything else. The first match wins; we then stop reading.
@@ -133,8 +140,8 @@ case "${TERMINAL_LINE}" in
     ;;
 esac
 
-# Step 7: Health check
-echo "[7/7] Waiting for services to be ready..."
+# Step 8: Health check
+echo "[8/8] Waiting for services to be ready..."
 MAX_WAIT=60
 ELAPSED=0
 while [ "${ELAPSED}" -lt "${MAX_WAIT}" ]; do
