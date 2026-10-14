@@ -12,12 +12,15 @@
 
 /**
  * Measured on companion-pp, 2026-10-14 (companion-updater#22): a PUT of one
- * ISO value answered in 0.40 s and the next GET already showed it. A PUT goes
- * through the relay to the camera over USB-PTP, so it gets more room than the
- * poll.
+ * ISO value answered in 0.40 s and the next GET already showed it. The
+ * service itself waits up to 10 s for the relay on a write (aggregator.rs
+ * `write_client`), and a write it completes must never be reported here as
+ * failed: the next queued step would then start from the old value and send
+ * the same target again. So the write timeout is the service's 10 s plus a
+ * margin.
  */
 const POLL_TIMEOUT_MS = 3000
-const WRITE_TIMEOUT_MS = 8000
+const WRITE_TIMEOUT_MS = 12000
 
 class BkshadingError extends Error {
 	constructor(message) {

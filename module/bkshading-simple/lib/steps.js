@@ -19,13 +19,18 @@
 
 const KELVIN_STEP = 100
 const TINT_STEP = 1
-const KELVIN_RANGE = [2500, 10000]
-const TINT_RANGE = [-50, 50]
+/** The panel's sliders (web/index.html): min, max and the slider's own step grid. */
+const KELVIN_SLIDER = { min: 2500, max: 10000, grid: 50 }
+const TINT_SLIDER = { min: -50, max: 50, grid: 1 }
 /**
  * apertureAv -> f-number goes through floating point (2^(av/2)), so a lens
- * sitting exactly on f/4.8 can read back as 4.7999999. Within this distance
- * of a choice the value counts as that choice, or "+" would "step" to the
- * same f-number and the press would do nothing.
+ * sitting exactly on a stop reads back a hair off it: on the pp cam6 list
+ * f/4.5, 6.2, 10, 12, 17, 19, 25 and 27 come back just below the stop and
+ * f/3.5, 4.8, 6.7, 7.3, 14, 15 and 21 just above. Within this distance of a
+ * choice the value counts as that choice, or "+" (resp. "-") would "step" to
+ * the same f-number and the press would do nothing. The bkshading panel
+ * itself has that dead press (it compares the raw value); this module
+ * deliberately does not copy the bug.
  */
 const SNAP_EPSILON = 0.005
 
@@ -62,8 +67,18 @@ function snapToChoice(value, choices) {
 	return value
 }
 
-function clamp(value, [min, max]) {
+function clamp(value, min, max) {
 	return Math.min(max, Math.max(min, value))
+}
+
+/**
+ * Where the panel's slider sits for a camera value: an <input type=range>
+ * clamps to min..max and snaps to its step grid (counted from min). The panel
+ * steps WB and tint from that position, so this module does too.
+ */
+function sliderValue(value, { min, max, grid }) {
+	const snapped = min + Math.round((clamp(value, min, max) - min) / grid) * grid
+	return snapped > max ? snapped - grid : snapped
 }
 
 function formatFNumber(f) {
@@ -130,23 +145,27 @@ function planStep(state, param, dir) {
 		}
 	}
 
-	const [key, step, range, suffix] = param === 'kelvin' ? ['kelvin', KELVIN_STEP, KELVIN_RANGE, 'K'] : ['tint', TINT_STEP, TINT_RANGE, '']
+	const [key, step, slider, suffix] = param === 'kelvin' ? ['kelvin', KELVIN_STEP, KELVIN_SLIDER, 'K'] : ['tint', TINT_STEP, TINT_SLIDER, '']
 	const current = params[key]
 	if (typeof current !== 'number') throw new StepError(`the camera reports no current ${key === 'kelvin' ? 'white balance' : 'tint'}`)
-	const value = clamp(Math.round(current) + dir * step, range)
-	return { patch: { [key]: value }, params: { ...params, [key]: value }, label: `${value}${suffix}`, unchanged: value === current }
+	const from = sliderValue(current, slider)
+	const value = clamp(from + dir * step, slider.min, slider.max)
+	// At the slider's end the panel disables the button: nothing is sent, even
+	// when the camera itself sits outside the slider range (e.g. 2000 K).
+	return { patch: { [key]: value }, params: { ...params, [key]: value }, label: `${value}${suffix}`, unchanged: value === from }
 }
 
 module.exports = {
 	PARAMS,
 	KELVIN_STEP,
 	TINT_STEP,
-	KELVIN_RANGE,
-	TINT_RANGE,
+	KELVIN_SLIDER,
+	TINT_SLIDER,
 	StepError,
 	stepChoice,
 	fNumberFromAv,
 	snapToChoice,
+	sliderValue,
 	displayValues,
 	planStep,
 }

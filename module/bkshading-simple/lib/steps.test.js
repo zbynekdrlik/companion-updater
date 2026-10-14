@@ -2,7 +2,7 @@
 
 const { test, describe } = require('node:test')
 const assert = require('node:assert/strict')
-const { stepChoice, fNumberFromAv, snapToChoice, displayValues, planStep, StepError } = require('./steps')
+const { stepChoice, fNumberFromAv, snapToChoice, sliderValue, displayValues, planStep, StepError, KELVIN_SLIDER, TINT_SLIDER } = require('./steps')
 const { ppCam6 } = require('../testing/fake-bkshading')
 
 const ISO = [25, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000]
@@ -99,6 +99,44 @@ describe('planStep on the real pp cam6 state', () => {
 		assert.equal(planStep(s, 'tint', -1).unchanged, true)
 		s.params.kelvin = 2550
 		assert.deepEqual(planStep(s, 'kelvin', -1).patch, { kelvin: 2500 })
+	})
+
+	test('every real f-number stop steps to its neighbours (AV round-trip noise included)', () => {
+		// f/4.5 reads back just below its stop and f/4.8 just above: compared raw,
+		// "+" from f/4.5 and "-" from f/4.8 would resend the same stop.
+		const choices = ppCam6().state.caps.fNumberChoices
+		for (let i = 0; i < choices.length; i++) {
+			const s = state()
+			s.params.apertureAv = 2 * Math.log2(choices[i])
+			const up = planStep(s, 'aperture', 1)
+			const down = planStep(s, 'aperture', -1)
+			assert.equal(up.label, `f/${choices[Math.min(i + 1, choices.length - 1)].toFixed(1)}`, `+ from f/${choices[i]}`)
+			assert.equal(down.label, `f/${choices[Math.max(i - 1, 0)].toFixed(1)}`, `- from f/${choices[i]}`)
+			assert.equal(up.unchanged, i === choices.length - 1)
+			assert.equal(down.unchanged, i === 0)
+		}
+	})
+
+	test('WB steps from where the panel slider sits: snapped to 50 K and clamped', () => {
+		const s = state()
+		s.params.kelvin = 5627 // the slider shows 5650
+		assert.deepEqual(planStep(s, 'kelvin', 1).patch, { kelvin: 5750 })
+		assert.deepEqual(planStep(s, 'kelvin', -1).patch, { kelvin: 5550 })
+		s.params.kelvin = 2000 // below the slider: the panel's "-" is disabled
+		assert.equal(planStep(s, 'kelvin', -1).unchanged, true)
+		assert.deepEqual(planStep(s, 'kelvin', 1).patch, { kelvin: 2600 })
+		s.params.kelvin = 12000
+		assert.equal(planStep(s, 'kelvin', 1).unchanged, true)
+		assert.deepEqual(planStep(s, 'kelvin', -1).patch, { kelvin: 9900 })
+	})
+
+	test('sliderValue mirrors an <input type=range>', () => {
+		assert.equal(sliderValue(5627, KELVIN_SLIDER), 5650)
+		assert.equal(sliderValue(5624, KELVIN_SLIDER), 5600)
+		assert.equal(sliderValue(1000, KELVIN_SLIDER), 2500)
+		assert.equal(sliderValue(99999, KELVIN_SLIDER), 10000)
+		assert.equal(sliderValue(-80, TINT_SLIDER), -50)
+		assert.equal(sliderValue(2.4, TINT_SLIDER), 2)
 	})
 
 	test('at the top ISO choice "+" is reported unchanged', () => {

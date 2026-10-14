@@ -59,7 +59,7 @@ describe('ShadingController', () => {
 	let ctl
 
 	async function poll() {
-		const startedAt = Date.now()
+		const startedAt = ctl.now()
 		ctl.applyAggregate(await client.cameras(), startedAt)
 	}
 
@@ -115,7 +115,7 @@ describe('ShadingController', () => {
 	})
 
 	test('a poll that started before a write cannot roll the step back', async () => {
-		const startedAt = Date.now() - 1000 // this GET left before the write below
+		const startedAt = ctl.now() - 1000 // this GET left before the write below
 		const stale = await client.cameras() // still says 1600 (the fake answers instantly)
 		stale.cameras[0].state.params.iso = 1600
 		await ctl.step('cam6', 'iso', 1)
@@ -123,6 +123,63 @@ describe('ShadingController', () => {
 		assert.equal(ctl.camera('cam6').state.params.iso, 2000)
 		const next = await ctl.step('cam6', 'iso', 1)
 		assert.equal(next.label, '2500')
+	})
+
+	test('a poll that leaves DURING a write and answers the old value after it cannot roll it back', async () => {
+		state.delayMs = (method) => (method === 'PUT' ? 80 : 0)
+		const press = ctl.step('cam6', 'iso', 1)
+		await new Promise((r) => setTimeout(r, 20)) // the PUT is in flight now
+		const startedAt = ctl.now()
+		const prePoll = await client.cameras() // answers 1600: the fake applies the PUT only when it answers
+		assert.equal(prePoll.cameras[0].state.params.iso, 1600)
+		await press
+		ctl.applyAggregate(prePoll, startedAt)
+		assert.equal(ctl.camera('cam6').state.params.iso, 2000)
+	})
+
+	test('a stale poll still brings in online, caps and notApplied; only the params are held', async () => {
+		const startedAt = ctl.now()
+		const stale = await client.cameras()
+		await ctl.step('cam6', 'iso', 1)
+		stale.cameras[0].state.notApplied = ['apertureNorm']
+		stale.cameras[0].state.caps = { ...stale.cameras[0].state.caps, isoChoices: [100, 2000, 4000] }
+		ctl.applyAggregate(stale, startedAt)
+		const cam = ctl.camera('cam6')
+		assert.equal(cam.state.params.iso, 2000)
+		assert.deepEqual(cam.state.notApplied, ['apertureNorm'])
+		assert.deepEqual(cam.state.caps.isoChoices, [100, 2000, 4000])
+		const next = await ctl.step('cam6', 'iso', 1)
+		assert.equal(next.label, '4000', 'the next step uses the new caps')
+	})
+
+	test('a relay reported unreachable while our write runs does not fail the queued presses', async () => {
+		state.delayMs = (method) => (method === 'PUT' ? 80 : 0)
+		const first = ctl.step('cam6', 'iso', 1)
+		const second = ctl.step('cam6', 'iso', 1)
+		await new Promise((r) => setTimeout(r, 20))
+		// The relay is busy with the write burst; the service's 1.5 s poll gives up on it.
+		ctl.applyAggregate({ version: 'x', cameras: [{ ...ppCam6(), reachable: false, state: null }] }, ctl.now())
+		assert.deepEqual(
+			(await Promise.all([first, second])).map((r) => r.label),
+			['2000', '2500'],
+		)
+	})
+
+	test('an unreachable relay reported after the writes ended is taken', async () => {
+		await ctl.step('cam6', 'iso', 1)
+		await new Promise((r) => setTimeout(r, 5))
+		ctl.applyAggregate({ version: 'x', cameras: [{ ...ppCam6(), reachable: false, state: null }] }, ctl.now())
+		assert.equal(ctl.camera('cam6').reachable, false)
+		await assert.rejects(ctl.step('cam6', 'iso', 1), /relay of cam6 is not reachable/)
+	})
+
+	test('each queued step reports the value it stepped from, measured when its turn came', async () => {
+		const results = await Promise.all([ctl.step('cam6', 'iso', 1), ctl.step('cam6', 'iso', 1), ctl.step('cam6', 'iso', 1)])
+		assert.deepEqual(
+			results.map((r) => `${r.from}->${r.label}`),
+			['1600->2000', '2000->2500', '2500->3200'],
+		)
+		for (const r of results) assert.ok(Number.isInteger(r.ms) && r.ms >= 0)
 	})
 
 	test('a poll that started after the write takes the camera value', async () => {

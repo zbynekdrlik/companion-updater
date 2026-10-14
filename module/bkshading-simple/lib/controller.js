@@ -1,9 +1,11 @@
 'use strict'
 
-const { planStep, StepError } = require('./steps')
+const { planStep, displayValues, StepError } = require('./steps')
 
 /** bkshading wire key reported in `notApplied` for each step parameter. */
 const WIRE_KEY = { iso: 'iso', aperture: 'apertureNorm', kelvin: 'kelvin', tint: 'tint' }
+/** displayValues() key for each step parameter. */
+const DISPLAY_KEY = { iso: 'iso', aperture: 'fnumber', kelvin: 'kelvin', tint: 'tint' }
 
 /**
  * The module's view of bkshading: the latest camera list, which camera the
@@ -19,9 +21,10 @@ class ShadingController {
 	/**
 	 * @param {object} opts
 	 * @param {{ setParams: (id: string, patch: object) => Promise<unknown> }} opts.client
-	 * @param {() => number} [opts.now]
+	 * @param {() => number} [opts.now] a MONOTONIC clock: "did this poll leave
+	 *   before that write ended?" must not flip when NTP steps the wall clock.
 	 */
-	constructor({ client, now = () => Date.now() }) {
+	constructor({ client, now = () => performance.now() }) {
 		this.client = client
 		this.now = now
 		/** id -> camera view from GET /api/cameras (params patched by our own writes) */
@@ -38,9 +41,14 @@ class ShadingController {
 	}
 
 	/**
-	 * Take a fresh GET /api/cameras answer. `pollStartedAt` is when that GET was
-	 * sent: a camera written to after it (or still being written to) keeps the
-	 * params our own write set, so a slow poll can never roll a step back.
+	 * Take a fresh GET /api/cameras answer. `pollStartedAt` (from `now()`) is
+	 * when that GET was sent. For a camera written to after it, or still being
+	 * written to, the answer may predate the write:
+	 * - the params our own write set are kept, so a slow poll can never roll a
+	 *   step back (everything else - online, caps, notApplied - is taken);
+	 * - a "relay not reachable" answer is ignored: the relay is busy with our
+	 *   write (its read waits for the write burst, and the service gives up on
+	 *   a relay poll after 1.5 s), and taking it would fail the queued presses.
 	 */
 	applyAggregate(aggregate, pollStartedAt) {
 		this.serviceVersion = aggregate.version ?? null
@@ -48,8 +56,10 @@ class ShadingController {
 		for (const cam of aggregate.cameras) {
 			if (!cam || typeof cam.id !== 'string') continue
 			const own = this.cameras.get(cam.id)
-			const stale = (this.busy.get(cam.id) || 0) > 0 || (this.lastWriteDone.get(cam.id) || -Infinity) >= pollStartedAt
-			if (stale && own && own.state && cam.state) {
+			const stale = (this.busy.get(cam.id) || 0) > 0 || (this.lastWriteDone.get(cam.id) ?? -Infinity) >= pollStartedAt
+			if (stale && own && own.reachable && own.state && !(cam.reachable && cam.state)) {
+				next.set(cam.id, own)
+			} else if (stale && own && own.state && cam.state) {
 				next.set(cam.id, { ...cam, state: { ...cam.state, params: own.state.params } })
 			} else {
 				next.set(cam.id, cam)
@@ -88,8 +98,10 @@ class ShadingController {
 
 	/**
 	 * Queue one step of `param` (+1 / -1) for camera `id`.
-	 * Resolves to { label, unchanged } once the camera has the new value, or
-	 * rejects with a StepError (cannot step) / BkshadingError (write failed).
+	 * Resolves to { from, label, unchanged, patch, ms } once the camera has the
+	 * new value (`from` and `ms` are measured when the step's turn came, not
+	 * when it was queued), or rejects with a StepError (cannot step) /
+	 * BkshadingError (write failed).
 	 */
 	step(id, param, dir) {
 		this.busy.set(id, (this.busy.get(id) || 0) + 1)
@@ -113,8 +125,10 @@ class ShadingController {
 			throw new StepError(`camera "${id}" is not in bkshading (cameras: ${known})`)
 		}
 		if (!cam.reachable) throw new StepError(`the relay of ${id} is not reachable`)
+		const started = this.now()
 		const plan = planStep(cam.state, param, dir)
-		if (plan.unchanged) return { label: plan.label, unchanged: true }
+		const from = displayValues(cam.state.params)[DISPLAY_KEY[param]]
+		if (plan.unchanged) return { from, label: plan.label, unchanged: true, ms: 0 }
 		await this.client.setParams(id, plan.patch)
 		// bkshading reflects a write in its very next GET; mirror that now so the
 		// next queued step starts from the new value.
@@ -122,7 +136,7 @@ class ShadingController {
 		if (current && current.state) {
 			this.cameras.set(id, { ...current, state: { ...current.state, params: plan.params } })
 		}
-		return { label: plan.label, unchanged: false, patch: plan.patch }
+		return { from, label: plan.label, unchanged: false, patch: plan.patch, ms: Math.round(this.now() - started) }
 	}
 }
 

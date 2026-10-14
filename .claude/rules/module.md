@@ -83,9 +83,11 @@ Behaviour the tests pin down:
 - camera-box is a foreign repo: never change bkshading from here; file a ticket there.
 - The +/− steps mirror bkshading `web/app.js` exactly:
   - ISO and aperture use `stepChoice` over `caps.isoChoices` / `caps.fNumberChoices`; aperture is sent as `apertureNorm = idx/(n-1)` and the f-number is `2^(apertureAv/2)`.
-  - WB steps ±100 K within 2500–10000; tint steps ±1 within −50…50.
+  - WB steps ±100 K and tint ±1, FROM WHERE THE PANEL'S SLIDER SITS: the camera value is clamped and snapped to the slider grid first (WB 2500–10000 in steps of 50, tint −50…50), see `sliderValue`. At a slider end nothing is sent, just as the panel disables the button there. So 5627 K "+" sends 5750, and 2000 K "−" sends nothing.
   - If the panel's step logic changes, update `lib/steps.js` and its tests.
-- The f-number read back from `apertureAv` carries floating-point noise (4.7999999). `snapToChoice` absorbs it, otherwise the first "+" would land on the same choice and do nothing (a test pins this).
+- The f-number read back from `apertureAv` carries floating-point noise: f/4.5 comes back as 4.499999999999999, about half of the real stops land a hair below the stop and the other half a hair above. `snapToChoice` absorbs it; a test steps from every real pp stop. This is a DELIBERATE difference from the panel, which has that dead press itself (reported on camera-box #808).
+- Writes: the module waits 12 s, because the service waits up to 10 s for the relay. A write the service completes must never be reported as failed, or the next queued step would resend the same target.
+- Clocks: the "poll older than the write" decisions use `performance.now()`, never `Date.now()`, because these rigs step their clocks through NTP.
 - Measured on pp, 2026-10-14: a PUT takes 0.4 s and the very next GET already shows the new value. Writes to one camera are serialised; each step is computed when its turn comes, from the value the previous write set; and a poll that started before a write never rolls it back (`applyAggregate(…, pollStartedAt)`).
 - Camera ids: snv cam1–cam7; pp cam4, cam6, cam7 and handheld-1..3. The OBS sources "Cam N" on the Grading page map to `camN`. A camera that is not in bkshading shows `-` and the press logs why.
 - Live tests change a real camera on the rig. Step it back afterwards so the camera is left as it was.

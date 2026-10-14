@@ -194,6 +194,25 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		assert.ok(instance.logs.some(([l, m]) => l === 'warn' && /^bkshading not reachable: GET .* no answer within 200 ms/.test(m)))
 		assert.equal(instance.variables.iso, '-')
 		assert.equal(instance.variables.online, 'off')
+		// per-camera variables too: never the last values as if the camera were live
+		assert.equal(instance.variables.cam6_iso, '-')
+		assert.equal(instance.variables.cam6_online, 'off')
+		assert.equal(instance.variables.cam6_fnumber, '-')
+	})
+
+	test('a camera that disappears from bkshading shows "-" / off', async () => {
+		state.cameras = state.cameras.filter((c) => c.id !== 'cam6')
+		await instance.poll()
+		assert.equal(instance.variables.cam6_iso, '-')
+		assert.equal(instance.variables.cam6_online, 'off')
+	})
+
+	test('fast presses log each real step', async () => {
+		const press = () => instance.actions.step.callback({ options: { param: 'iso', direction: 'up', camera: '' } }, context)
+		await Promise.all([press(), press(), press()])
+		const steps = instance.logs.filter(([l, m]) => l === 'info' && m.startsWith('cam6 iso +:')).map(([, m]) => m.split(' (')[0])
+		assert.deepEqual(steps, ['cam6 iso +: 1600 -> 2000', 'cam6 iso +: 2000 -> 2500', 'cam6 iso +: 2500 -> 3200'])
+		assert.equal(instance.variables.iso, '3200')
 	})
 
 	test('no host -> BadConfig, and actions log instead of throwing', async () => {

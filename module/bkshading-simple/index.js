@@ -36,6 +36,12 @@ class BkshadingSimpleInstance extends InstanceBase {
 		this.pollFailures = 0
 		this.lastHealth = null
 		this.knownIds = ''
+		/**
+		 * Every camera id seen since the module started. Their variables stay
+		 * defined (showing '-' / off) when a camera drops out of bkshading or
+		 * bkshading is down, so a button never shows a stale live value.
+		 */
+		this.knownIdList = []
 		this.selected = null
 	}
 
@@ -129,7 +135,7 @@ class BkshadingSimpleInstance extends InstanceBase {
 
 	async runPoll(client) {
 		const controller = this.controller
-		const startedAt = Date.now()
+		const startedAt = controller.now()
 		try {
 			const aggregate = await client.cameras()
 			if (client !== this.client) return
@@ -168,8 +174,9 @@ class BkshadingSimpleInstance extends InstanceBase {
 		const key = ids.join(',')
 		if (key === this.knownIds) return
 		this.knownIds = key
+		this.knownIdList = [...new Set([...this.knownIdList, ...ids])]
 		this.setActionDefinitions(this.actionDefinitions(ids))
-		this.defineVariables(ids)
+		this.defineVariables(this.knownIdList)
 		this.log('debug', `Camera list: ${key || 'empty'}`)
 	}
 
@@ -210,7 +217,9 @@ class BkshadingSimpleInstance extends InstanceBase {
 			tint: sel.tint,
 			service_version: controller.serviceVersion ?? '-',
 		}
-		for (const id of controller.order) {
+		// A camera that vanished from the answer (or bkshading is down) shows '-'/'off',
+		// never its last values as if it were still live.
+		for (const id of new Set([...this.knownIdList, ...controller.order])) {
 			const v = varId(id)
 			const c = cameraValues(controller.camera(id))
 			values[`${v}_online`] = c.online
@@ -257,14 +266,12 @@ class BkshadingSimpleInstance extends InstanceBase {
 			this.log('error', `Step ${param} ${sign}: no camera selected`)
 			return
 		}
-		const before = cameraValues(this.controller.camera(id))
-		const started = Date.now()
 		try {
 			const result = await this.controller.step(id, param, dir)
 			if (result.unchanged) {
 				this.log('info', `${id} ${param} ${sign}: already at the end (${result.label})`)
 			} else {
-				this.log('info', `${id} ${param} ${sign}: ${before[param === 'aperture' ? 'fnumber' : param]} -> ${result.label} (${JSON.stringify(result.patch)}, ${Date.now() - started} ms)`)
+				this.log('info', `${id} ${param} ${sign}: ${result.from} -> ${result.label} (${JSON.stringify(result.patch)}, ${result.ms} ms)`)
 			}
 		} catch (err) {
 			this.log('error', `${id} ${param} ${sign} failed: ${err.message}`)
