@@ -65,12 +65,13 @@ COMPANION_HOST=companion-pp.lan COMPANION_USER=admin COMPANION_PASS=... ./deploy
 
 The deploy script:
 1. Installs udev rules from `host/` to `/etc/udev/rules.d/`
-2. Installs the backup pusher (script + systemd timer)
-3. Builds the `companion-updater` Rust binary locally and installs it as a systemd service
-4. Triggers the Companion upgrade through that freshly deployed updater
+2. Enables NTP time sync (`host/ensure-timesync.sh`) and fails if the clock does not synchronise
+3. Installs the backup pusher (script + systemd timer)
+4. Builds the `companion-updater` Rust binary locally and installs it as a systemd service
+5. Triggers the Companion upgrade through that freshly deployed updater
    (binary first, upgrade second — otherwise a fix to the upgrade path could
    never take effect in the deploy that ships it)
-5. Waits for health checks to pass
+6. Waits for health checks to pass
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
 

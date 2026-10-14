@@ -18,12 +18,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
 
+# sshpass -e reads SSHPASS, so the password never appears on a command line (ps).
+export SSHPASS="${COMPANION_PASS}"
+
 remote() {
-  sshpass -p "${COMPANION_PASS}" ssh ${SSH_OPTS} "${COMPANION_USER}@${COMPANION_HOST}" "$@"
+  sshpass -e ssh ${SSH_OPTS} "${COMPANION_USER}@${COMPANION_HOST}" "$@"
 }
 
 remote_copy() {
-  sshpass -p "${COMPANION_PASS}" scp ${SSH_OPTS} -r "$@"
+  sshpass -e scp ${SSH_OPTS} -r "$@"
 }
 
 echo "=== Deploying to ${COMPANION_HOST} ==="

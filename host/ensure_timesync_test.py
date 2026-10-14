@@ -21,7 +21,7 @@ STUB = """#!/bin/bash
 set -euo pipefail
 echo "$*" >> "${STUB_DIR}/calls"
 case "$*" in
-  "set-ntp true") exit 0 ;;
+  "set-ntp true") exit "${STUB_SETNTP_EXIT}" ;;
   "show -p NTPSynchronized --value")
     n=$(wc -l < "${STUB_DIR}/calls")
     if [ "${STUB_SYNC_AFTER}" -ge 0 ] && [ "$n" -gt "${STUB_SYNC_AFTER}" ]; then echo yes; else echo no; fi ;;
@@ -31,7 +31,7 @@ esac
 """
 
 
-def run(sync_after, tries=3):
+def run(sync_after, tries=3, setntp_exit=0):
     """sync_after = number of stub calls before it starts answering 'yes' (-1 = never)."""
     tmp = tempfile.TemporaryDirectory()
     stub = os.path.join(tmp.name, "timedatectl")
@@ -43,6 +43,7 @@ def run(sync_after, tries=3):
         PATH=tmp.name + os.pathsep + os.environ["PATH"],
         STUB_DIR=tmp.name,
         STUB_SYNC_AFTER=str(sync_after),
+        STUB_SETNTP_EXIT=str(setntp_exit),
         TIMESYNC_TRIES=str(tries),
         TIMESYNC_INTERVAL="0",
     )
@@ -66,6 +67,11 @@ class EnsureTimesync(unittest.TestCase):
         self.assertEqual(calls[0], "set-ntp true")
         self.assertEqual(calls.count("show -p NTPSynchronized --value"), 3)
         self.assertIn("not synchronised", proc.stderr)
+
+    def test_fails_when_turning_ntp_on_fails_even_if_the_clock_reports_synced(self):
+        proc, calls = run(sync_after=0, setntp_exit=1)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(calls, ["set-ntp true"])
 
 
 if __name__ == "__main__":
