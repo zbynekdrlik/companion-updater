@@ -50,11 +50,15 @@ jobs:
         run: cargo test -p companion-updater
 
   module:
-    name: Companion module (resolume-simple)
+    name: Companion module (${{ matrix.module }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [resolume-simple, bkshading-simple]
     defaults:
       run:
-        working-directory: module/resolume-simple
+        working-directory: module/${{ matrix.module }}
     steps:
       - uses: actions/checkout@v4
 
@@ -62,7 +66,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: module/resolume-simple/package-lock.json
+          cache-dependency-path: module/${{ matrix.module }}/package-lock.json
 
       - name: Install
         run: npm ci --no-audit --no-fund

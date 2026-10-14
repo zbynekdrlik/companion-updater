@@ -3,7 +3,9 @@ paths:
   - "module/**"
 ---
 
-# resolume-simple — our own Companion module for Resolume
+# Our own Companion modules (resolume-simple, bkshading-simple)
+
+## resolume-simple — Resolume
 
 ## Why it exists (do not "simplify" it back to WebSocket)
 
@@ -45,11 +47,11 @@ Behaviour the tests pin down:
 
 ## Deploy
 
-- `COMPANION_PASS=… module/deploy.sh <host>` (companion.lan = snv, 100.101.72.101 = pp). It deploys only committed, pushed code.
+- `COMPANION_PASS=… module/deploy.sh <host> [module-id]` (companion.lan = snv, 100.101.72.101 = pp; module-id defaults to `resolume-simple`). It deploys only committed, pushed code.
 - A remote EXIT trap always restarts Companion.
 - NEVER leave a second copy of a module inside `/opt/companion-module-dev`. Companion loads every directory there, and a duplicate id silently wins: a `resolume-simple.old` backup in that directory made Companion run the old version. The fallback lives in `/opt/companion-module-backup/<id>`, and the verify script fails if the id appears more than once.
 - A deploy that passes verification stamps `${DEST}/.verified`, and the backup copy is always a verified module. At install time a stamped `DEST` becomes the backup; an unstamped leftover from a half-failed deploy is simply replaced.
-- Verification (`module/verify-deploy.py`, run as root on the rig, reading the DB of the RUNNING Companion version) requires every enabled resolume-simple connection to log the outcome of its first health check after the restart. Either `Connected to …` or `Resolume not reachable: …` counts, because a switched-off Arena is not a broken module.
+- Verification (`module/verify-deploy.py`, run as root on the rig, reading the DB of the RUNNING Companion version) requires every enabled connection of the module to log the outcome of its first health check after the restart. `Connected to …` or `<Name> not reachable: …` counts (`health_outcomes()`, tested), because a switched-off Arena or strih PC is not a broken module. A new module must log exactly those two shapes.
 - Any failure (install, restart, verification, unknown DB schema) rolls back to the backup in `/opt/companion-module-backup/<id>`.
 - The duplicate-id check fails closed on purpose. If another directory with the same module id appears in `/opt/companion-module-dev` (for example a manual copy), every deploy fails verification and rolls back until someone removes that directory by hand; the verify output names it.
 - The verify script exits 0 (ok), 3 (waiting), 2 (cannot verify), or 4 (module errors logged; only checked when no connection exists).
@@ -74,3 +76,16 @@ Behaviour the tests pin down:
 - The pp buttons use `connect_column_by_number` (group 2) because resolume-pp was off at migration time. The same buttons also drive cg Arena (`cg_resolume`, group 1 + layer 13/9 clips); leave those alone.
 - Page 11 r3c0 is an old "reset connections" button pointing at connection ids that no longer exist.
 
+
+## bkshading-simple — camera ISO / clona / WB / tint (companion-updater#22)
+
+- Talks to the **bkshading** service from the camera-box repo (issue 808) on the strih PC: `strih.lan:8770` on both rigs. On pp, `strih.lan` = strih-pp.lan 10.77.8.202. It uses only `GET /api/cameras` (polled every 2 s) and `PUT /api/cameras/:id/params` (ABSOLUTE values).
+- camera-box is a foreign repo: never change bkshading from here; file a ticket there.
+- The +/− steps mirror bkshading `web/app.js` exactly:
+  - ISO and aperture use `stepChoice` over `caps.isoChoices` / `caps.fNumberChoices`; aperture is sent as `apertureNorm = idx/(n-1)` and the f-number is `2^(apertureAv/2)`.
+  - WB steps ±100 K within 2500–10000; tint steps ±1 within −50…50.
+  - If the panel's step logic changes, update `lib/steps.js` and its tests.
+- The f-number read back from `apertureAv` carries floating-point noise (4.7999999). `snapToChoice` absorbs it, otherwise the first "+" would land on the same choice and do nothing (a test pins this).
+- Measured on pp, 2026-10-14: a PUT takes 0.4 s and the very next GET already shows the new value. Writes to one camera are serialised; each step is computed when its turn comes, from the value the previous write set; and a poll that started before a write never rolls it back (`applyAggregate(…, pollStartedAt)`).
+- Camera ids: snv cam1–cam7; pp cam4, cam6, cam7 and handheld-1..3. The OBS sources "Cam N" on the Grading page map to `camN`. A camera that is not in bkshading shows `-` and the press logs why.
+- Live tests change a real camera on the rig. Step it back afterwards so the camera is left as it was.
