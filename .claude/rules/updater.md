@@ -87,10 +87,17 @@ The NTP server comes from DHCP:
 - **Login.** The managed hosts (companion-snv, companion-update-snv, companion-update-pp) are behind Cloudflare Access: one-time PIN to the owner's e-mail, reusable policy "Companion owner (OTP email) · claude", 730h session like the other newlevel apps (owner's choice of 2026-10-21; 120 days was offered and declined). A device logged in to any newlevel app gets in through the organisation's shared login without another PIN. The account has no other identity provider and no WARP.
 - **Second layer.** Each ingress rule also has `originRequest.access.required` with the app's aud, so cloudflared on the rig itself rejects requests without a valid Access token. That covers a deleted app or a bypass policy. It does NOT cover a loosened allow policy (everyone, any PIN login, email_domain): those logins get a token with the same aud. That is why the policies themselves are checked to name people only.
 - **Companion 5 refuses the UI WebSocket from the tunnel unless loopback is a trusted proxy.** Its tRPC upgrade handler rejects (403) a loopback client whose Host is not localhost/loopback, and also any Origin whose host differs from Host. cloudflared connects from loopback with the public Host, so the page loaded, `wss://…/trpc` got 502, and the UI sat on "connecting" while every 302 probe was green. Fix: `trustedProxies: loopback` in `/etc/companion/config.yaml` (launch.sh turns it into `--trusted-proxies`; update.sh's `config-tool init` never overwrites a set value; `config-tool validate` does NOT check the value's format). `host/ensure-companion-proxy.sh` sets it and fails unless a loopback handshake with the public Host and Origin answers 101.
-  - It restarts Companion when it changed the file. It also restarts once on a 403 when the file already trusts loopback: a hand edit, or an earlier run that died, leaves Companion running the older config.
+  - It reads the value Companion will get from config-tool `generate`, the snippet launch.sh sources, and never parses the YAML itself. It edits only an unset value, then requires `generate` to read back exactly `loopback`. Probed on companion-pp 2026-10-21:
+    - null, empty, `~` and `""` are unset;
+    - quotes and comments are dropped;
+    - an indented next line is the value;
+    - with a duplicate key, the first wins;
+    - ANY list (`[x]`, `[]`, `- x`) is a config-tool error, and launch.sh then starts Companion with NO flags (no extra module path).
+    The script never restarts onto a file config-tool cannot read.
+  - It restarts Companion when it changed the file. It also restarts once, after `validate`, on a 403 when the file already gives loopback: a hand edit, or an earlier run that died, leaves Companion running the older config. A 403 from a Companion it restarted fails at once.
   - Anything failing after its edit puts the old config back (temp file plus mv) and restarts Companion on it. If the restore itself fails, the backup is kept and its path printed.
   - The handshake goes over bash `/dev/tcp` and reads only the status line. A 101 keeps the WebSocket open, so curl would wait out its whole `-m` on every success, and an answer slower than that would read as dead.
-  - deploy.sh runs it ONCE, in step 9 after the upgrade (an old rig gets its config.yaml from that upgrade), whenever cloudflared-companion is active.
+  - deploy.sh runs it in step 7, before the tunnel starts, when Companion already has its launch config. It runs again in step 9, after the upgrade (which creates that config on a pre-5.0 rig), whenever this deploy started the tunnel or one is running.
   - Side effect: Companion sees the real client IP from X-Forwarded-For instead of 127.0.0.1.
   - Design trade-off (2026-10-21): trusting loopback switches off Companion's DNS-rebinding guard for a browser running ON the rig. Companion applies that guard only to loopback, so any LAN browser already bypasses it. The alternative, ingress to the rig's LAN name, would tie the tunnel to LAN DNS and addressing. Kept.
 - **A 302 probe proves only the login gate.** The real-user check is a browser through the public URL: a temporary Access service token (`non_identity` policy) attached to the managed apps, Chromium sending `CF-Access-Client-Id/Secret` as extra headers, then the policy and token deleted and `plan` re-run clean. The covered hosts (companion-pp, companion.newlevel.media) belong to the owner's app and cannot be tested that way; their Companion is covered by the loopback handshake check.
@@ -101,7 +108,14 @@ The NTP server comes from DHCP:
   - `plan` (exit 3 = changes pending), `apply` (re-plans and must end clean), `status` (exit 1 = a tunnel is down).
   - It needs `COMPANION_ACCESS_EMAILS` = the owner's e-mail (see local memory); `install-token` needs it too, because it refuses unless `plan` is clean. Never commit e-mail addresses here (public repo).
   - Hostnames another Access app already covers (main domain OR extra destination: companion-pp is a destination of the owner's "newlevel" app) are only checked, never given a second app. A POST for a covered host answers 409. All apps are listed with paging, because a `domain=` filter misses extra destinations.
-  - `plan`/`apply` also read the presenter tunnels on the rigs (presenter-prod / presenter-pp, routing `:80` on 2026-10-21; `status` does not). They stop on a rule reaching `:8000` or `:8081`, a rule that can reach any port (`bastion`, `socks5`, `bastionMode`, `proxyType: socks`), a service URL they cannot parse, or a neighbour that is missing or managed on the rig: unchecked is not safe. Companion trusts every loopback client, so such a rule would publish it under the presenter's Access.
+  - `plan`/`apply` also read the presenter tunnels on the rigs (presenter-prod / presenter-pp, routing `:80` on 2026-10-21; `status` does not). They stop on any of these:
+    - a rule reaching `:8000` or `:8081`;
+    - anything that can reach any port: `bastion`, `socks-proxy`, or `bastionMode` / `proxyType: socks` on a rule or tunnel-wide;
+    - WARP routing;
+    - a non-URL service outside the allowlist (`http_status:*`, `hello_world`, `unix:`);
+    - a service URL they cannot parse;
+    - a neighbour that is missing or managed on the rig.
+    Unchecked is not safe: Companion trusts every loopback client, so such a rule would publish it under the presenter's Access.
   - `hosts <rig> [--ui]` prints a rig's hostnames from `TUNNELS` (no token needed); deploy.sh takes them from there, so the tunnel map has one copy.
   - It writes in a safe order: Access policy and apps → alert → ingress → DNS. Every conflict is checked before the first write, so a hostname is never routed before its app exists.
   - The API token comes from `$CF_TOKEN_FILE`; the default is the `cloudflare-newlevel-full` key file in the secrets dir.
@@ -110,7 +124,7 @@ The NTP server comes from DHCP:
   - the token is missing (opt out with `COMPANION_TUNNEL=skip`);
   - the unit dies;
   - or the public URL does not answer `302` to `newlevelchurch.cloudflareaccess.com`.
-  A `200` (public without login) stops the tunnel at once. Step 9 then fails if Companion refuses the UI WebSocket from the tunnel.
+  A `200` (public without login) stops the tunnel at once. Step 7 (before the tunnel starts) and step 9 (after the upgrade) also fail when Companion refuses the UI WebSocket from the tunnel.
 - **Updater dashboard CSRF.** `GET /api/update/stream` stops and upgrades Companion. A link on another site, or one opened from mail or chat, would otherwise ride the owner's Access cookie. So the updater answers 403 to `Sec-Fetch-Site: cross-site|same-site` and to any `Sec-Fetch-Mode: navigate` (`updater/backend/src/guard.rs`); router-level tests pin the wiring. Browsers send these headers only to the HTTPS public URLs; the LAN `http://<rig>:8081` has never had authentication. The managed apps also set SameSite=Lax.
 - **Outage alert.** The notification "Companion tunnels health · claude" (`tunnel_health_event`, both tunnel ids, NO status filter) e-mails the owner on every health change. The status filter's value format is undocumented, and a wrong value would never fire. Proof that it fires: `GET /accounts/{acc}/alerting/v3/history` after a controlled stop. In history, `policy_id` is the dashed UUID while the policies list gives the same id WITHOUT dashes, so compare them normalised. `alert_body.new_status` is e.g. `TUNNEL_STATUS_TYPE_DOWN` / `TUNNEL_STATUS_TYPE_HEALTHY`. Observed 2026-10-21:
 - The DOWN mail went out 3 s after a stop, and HEALTHY 20–25 s after the start.

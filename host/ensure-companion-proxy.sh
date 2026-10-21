@@ -11,6 +11,11 @@
 # companion-pi's launch.sh passes it to Companion, and update.sh never
 # overwrites a value that is already set.
 #
+# What Companion gets is read through config-tool `generate`, the very snippet
+# launch.sh sources, instead of parsing the YAML here. When config-tool cannot
+# read the file, launch.sh starts Companion with NONE of its settings, so this
+# script then changes nothing and restarts nothing.
+#
 # The rig is a live A/V machine: if anything fails after the config was edited,
 # the old config is put back (atomically) and Companion restarted on it.
 set -euo pipefail
@@ -37,21 +42,23 @@ if [ ! -f "${CONFIG}" ]; then
   exit 1
 fi
 
-KEY='^trustedProxies[[:space:]]*:'
-keys="$(grep -c "${KEY}" "${CONFIG}" || true)"
-if [ "${keys}" -gt 1 ]; then
-  echo "ERROR: ${CONFIG} sets trustedProxies ${keys} times; keep one line and deploy again." >&2
-  exit 1
-fi
-# The value as written (comment dropped), then unquoted and out of a [flow, list].
-raw="$(sed -n "s/${KEY}[[:space:]]*//p" "${CONFIG}" | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//')"
-value="$(printf '%s' "${raw}" | tr -d "\"'" | sed 's/^\[[[:space:]]*//; s/[[:space:]]*\]$//')"
-# An empty value followed by "- item" lines (after any blank or comment lines) is a block list.
-next_line="$(awk -v key="${KEY}" 'found && $0 !~ /^[[:space:]]*(#.*)?$/ { print; exit } $0 ~ key { found = 1 }' "${CONFIG}")"
-if [ -z "${raw}" ] && printf '%s\n' "${next_line}" | grep -E '^[[:space:]]*-' >/dev/null; then
-  echo "ERROR: ${CONFIG} has trustedProxies as a YAML list; write it on one line (comma-separated) including loopback, and deploy again." >&2
-  exit 1
-fi
+config_tool() {
+  COMPANION_CONFIG_FILE="${CONFIG}" "${NODE}" "${CONFIG_TOOL}" "$@"
+}
+
+# The --trusted-proxies value launch.sh would pass Companion ("" = none); fails
+# when config-tool cannot read the file.
+trusted_proxies() {
+  local snippet
+  snippet="$(config_tool generate)" || return 1
+  # shellcheck disable=SC2016  # expanded by the inner bash, on the snippet's own `set --`
+  bash -c 'eval "$0"; v=""; while [ "$#" -gt 0 ]; do case "$1" in --trusted-proxies) v="${2:-}"; shift ;; --trusted-proxies=*) v="${1#*=}" ;; esac; shift || break; done; printf "%s" "${v}"' "${snippet}"
+}
+
+# Companion splits the value on , and ; and trims each entry.
+includes_loopback() {
+  printf '%s\n' "$1" | tr ',;' '\n\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -x loopback >/dev/null
+}
 
 # One HTTP request over bash's /dev/tcp; prints the status code, or nothing.
 # Only the status line is read: a WebSocket answering 101 then stays open, and a
@@ -61,25 +68,37 @@ http_status() {
   if [ "${3:-}" = upgrade ]; then
     extra="Origin: https://${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
   fi
-  timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1" && printf "GET %s HTTP/1.1\r\nHost: %s\r\n%b\r\n" "$2" "$3" "$4" >&3 && read -r _ code _ <&3 && printf "%s" "${code}"' \
-    "${ADDR}" "${PORT}" "${path}" "${host}" "${extra}" 2>/dev/null || true
+  { timeout 5 bash -c 'exec 3<>"/dev/tcp/$0/$1" && printf "GET %s HTTP/1.1\r\nHost: %s\r\n%b\r\n" "$2" "$3" "$4" >&3 && read -r _ code _ <&3 && printf "%s" "${code}"' \
+    "${ADDR}" "${PORT}" "${path}" "${host}" "${extra}" 2>/dev/null || true; } | tr -d '\r'
 }
 
 wait_for_companion() {
   for _attempt in $(seq 1 "${TRIES}"); do
-    if [ "$(http_status / "${ADDR}:${PORT}")" = 200 ]; then
-      return 0
-    fi
+    case "$(http_status / "${ADDR}:${PORT}")" in
+      2?? | 3??) return 0 ;;
+    esac
     sleep "${INTERVAL}"
   done
   return 1
 }
+
+keys="$(grep -c '^trustedProxies[[:space:]]*:' "${CONFIG}" || true)"
+if [ "${keys}" -gt 1 ]; then
+  echo "ERROR: ${CONFIG} sets trustedProxies ${keys} times; keep one line and deploy again." >&2
+  exit 1
+fi
+current=""
+if ! current="$(trusted_proxies)"; then
+  echo "ERROR: config-tool cannot read ${CONFIG} (see above), so launch.sh would start Companion with none of its settings. Fix the file by hand; nothing changed." >&2
+  exit 1
+fi
 
 backup=""
 restarted=no
 undo_on_failure() {
   local rc=$?
   trap - EXIT
+  trap '' HUP INT TERM PIPE
   if [ -n "${backup}" ]; then
     if cp -p "${backup}" "${CONFIG}.restore" && mv -f "${CONFIG}.restore" "${CONFIG}"; then
       rm -f "${backup}"
@@ -101,15 +120,12 @@ trap 'exit 130' INT
 trap 'exit 141' PIPE
 trap 'exit 143' TERM
 
-if printf '%s\n' "${value}" | tr ',;' '\n\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -x loopback >/dev/null; then
-  echo "  ${CONFIG}: trustedProxies already includes loopback."
+if includes_loopback "${current}"; then
+  echo "  ${CONFIG}: Companion gets --trusted-proxies '${current}', loopback included."
+elif [ -n "${current}" ]; then
+  echo "ERROR: ${CONFIG} already trusts '${current}' as a proxy; add loopback to that value by hand (comma-separated) and deploy again." >&2
+  exit 1
 else
-  case "${value}" in
-    "" | null | "~") ;;
-    *)
-      echo "ERROR: ${CONFIG} already trusts '${raw}' as a proxy; add loopback to that list by hand (comma-separated) and deploy again." >&2
-      exit 1 ;;
-  esac
   new_backup="$(mktemp)"
   if ! cp -p "${CONFIG}" "${new_backup}"; then
     rm -f "${new_backup}"
@@ -118,21 +134,27 @@ else
   fi
   backup="${new_backup}"
   if [ "${keys}" -eq 1 ]; then
-    sed -i "s/${KEY}.*/trustedProxies: loopback/" "${CONFIG}"
+    sed -i 's/^trustedProxies[[:space:]]*:.*/trustedProxies: loopback/' "${CONFIG}"
   else
     [ -z "$(tail -c 1 "${CONFIG}")" ] || echo >> "${CONFIG}"
     echo "trustedProxies: loopback" >> "${CONFIG}"
   fi
-  if ! COMPANION_CONFIG_FILE="${CONFIG}" "${NODE}" "${CONFIG_TOOL}" validate; then
+  if ! config_tool validate; then
     echo "ERROR: config-tool rejected 'trustedProxies: loopback'; Companion not restarted." >&2
     exit 1
   fi
-  echo "  ${CONFIG}: trustedProxies: loopback (was '${raw:-unset}'); restarting Companion..."
+  after=""
+  if ! after="$(trusted_proxies)" || [ "${after}" != loopback ]; then
+    echo "ERROR: after the edit config-tool reads trustedProxies as '${after:-unset}', not 'loopback'; Companion not restarted." >&2
+    exit 1
+  fi
+  echo "  ${CONFIG}: trustedProxies: loopback (was unset); restarting Companion..."
   restarted=yes
   systemctl restart companion
 fi
 
 # The same request cloudflared makes: from loopback, with the public Host and Origin.
+accepted=()
 for host in "$@"; do
   code=""
   attempt=0
@@ -147,8 +169,12 @@ for host in "$@"; do
       if [ "${restarted}" = yes ]; then
         break
       fi
-      # The file trusts loopback but the running Companion was started before that
+      # The file gives loopback but the running Companion was started before that
       # (a hand edit, or an earlier run that died): one restart loads it.
+      if ! config_tool validate; then
+        echo "ERROR: Companion refused (403) the web UI connection and ${CONFIG} does not validate; Companion not restarted. Fix the file by hand." >&2
+        exit 1
+      fi
       echo "  Companion refused the web UI connection although ${CONFIG} trusts loopback; restarting it once to load that..."
       restarted=yes
       systemctl restart companion
@@ -158,7 +184,7 @@ for host in "$@"; do
     sleep "${INTERVAL}"
   done
   case "${code}" in
-    101) echo "  Companion accepts the web UI connection for https://${host}." ;;
+    101) accepted+=("  Companion accepts the web UI connection for https://${host}.") ;;
     403)
       echo "ERROR: Companion refused (403) the web UI connection for https://${host}: the page would load but never connect (journalctl -u companion | grep 'Rejected tRPC')." >&2
       exit 1 ;;
@@ -171,8 +197,10 @@ for host in "$@"; do
   esac
 done
 
-# Success: keep the new config.
+# Success: keep the new config first, then report (a dead ssh session on the
+# report must not roll back a proven config).
 if [ -n "${backup}" ]; then
   rm -f "${backup}"
   backup=""
 fi
+printf '%s\n' "${accepted[@]}"
