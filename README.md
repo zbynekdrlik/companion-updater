@@ -68,12 +68,13 @@ The deploy script (`[1/9]`…`[9/9]` in its output):
 2. Installs udev rules from `host/` to `/etc/udev/rules.d/`
 3. Enables NTP time sync (`host/ensure-timesync.sh`) and fails if the clock does not synchronise
 4. Installs the backup pusher (script + systemd timer)
-5. Installs and starts the web access tunnel (`cloudflared-companion.service`). It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
-6. Builds the `companion-updater` Rust binary locally
-7. Installs it as a systemd service
+5. Builds the `companion-updater` Rust binary locally
+6. Installs it as a systemd service
+7. Installs and starts the web access tunnel (`cloudflared-companion.service`), after the updater so the public dashboard is never served without its cross-site guard. It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
 8. Triggers the Companion upgrade through that freshly deployed updater
    (binary first, upgrade second — otherwise a fix to the upgrade path could
-   never take effect in the deploy that ships it)
+   never take effect in the deploy that ships it). `COMPANION_UPGRADE=skip`
+   deploys the tooling only and leaves Companion at its version
 9. Waits for health checks to pass
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
@@ -112,7 +113,12 @@ Repository:
 | https://companion-pp.newlevel.media | companion-pp | Companion UI (:8000) |
 | https://companion-update-pp.newlevel.media | companion-pp | Update dashboard (:8081) |
 
-Every URL is behind Cloudflare Access: one-time PIN to the owner's e-mail, with a 30-day session like the other newlevel apps. cloudflared on the rig rejects any request without a valid Access token as well.
+Every URL is behind Cloudflare Access with a one-time PIN by e-mail:
+
+- **companion-snv, companion-update-snv, companion-update-pp:** Access apps managed by `host/cloudflare_companion.py`. Only the owner's e-mail is allowed, with a 30-day session like the other newlevel apps.
+- **companion-pp and the old `companion.newlevel.media`:** the owner's own Access app "newlevel". Its policy "basic" allows the owner and the two people he chose. The tool only checks this app; it never changes it.
+
+cloudflared on the rig also rejects any request without a valid Access token for that hostname's app.
 
 **Never run `cloudflared service install <token>` for companion.** It rewrites `cloudflared.service`, which on these rigs belongs to the presenter project's tunnel. That command is how the companion tunnels went down unnoticed before. Companion runs its own unit, `cloudflared-companion.service`.
 

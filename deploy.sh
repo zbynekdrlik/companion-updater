@@ -82,11 +82,45 @@ else
   echo "  Then re-run this deploy or:  sudo systemctl enable --now companion-backup-push.timer"
 fi
 
-# Step 5: Companion web UI tunnel (companion-updater#26). Its own unit next to
-# the presenter's cloudflared.service. A rig without the tunnel token fails the
+# Step 5: Build companion-updater binary locally
+echo "[5/9] Building companion-updater..."
+"${SCRIPT_DIR}/updater/build.sh"
+BIN="${SCRIPT_DIR}/updater/target/release/companion-updater"
+if [ ! -x "${BIN}" ]; then
+  echo "ERROR: ${BIN} not found"
+  exit 1
+fi
+
+# Step 6: Deploy companion-updater binary and systemd unit
+#
+# The binary is deployed BEFORE the Companion upgrade is triggered, so the
+# upgrade always runs through the code in THIS checkout. Doing it the other way
+# round meant a deploy could never fix a bug in the upgrade path itself — the
+# old binary ran the upgrade, and the fix only took effect a deploy later.
+echo "[6/9] Deploying companion-updater..."
+remote "sudo systemctl stop companion-updater 2>/dev/null || true"
+remote_copy "${BIN}" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater"
+remote "sudo install -m 0755 /tmp/companion-updater /usr/local/bin/companion-updater && rm /tmp/companion-updater"
+remote_copy "${SCRIPT_DIR}/updater/companion-updater.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater.service"
+remote "sudo install -m 0644 /tmp/companion-updater.service /etc/systemd/system/companion-updater.service && rm /tmp/companion-updater.service"
+remote "sudo systemctl daemon-reload && sudo systemctl enable --now companion-updater"
+echo "  companion-updater deployed."
+
+# Wait for the freshly started updater to serve before driving it.
+for _ in $(seq 1 12); do
+  if remote "curl -sf --max-time 3 http://127.0.0.1:8081/healthz" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 5
+done
+
+# Step 7: Companion web UI tunnel (companion-updater#26). Its own unit next to
+# the presenter's cloudflared.service. It comes AFTER the updater install, so
+# the public update dashboard is never served by an updater without the
+# cross-site guard. A rig without the tunnel token fails the
 # deploy (that silent state is how the tunnels sat dead for weeks); a deliberate
 # deploy without web access sets COMPANION_TUNNEL=skip.
-echo "[5/9] Installing the Companion web UI tunnel..."
+echo "[7/9] Installing the Companion web UI tunnel..."
 remote_copy "${SCRIPT_DIR}/host/cloudflared-companion.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/cloudflared-companion.service"
 remote "sudo install -m 0644 /tmp/cloudflared-companion.service /etc/systemd/system/cloudflared-companion.service && rm /tmp/cloudflared-companion.service"
 remote_copy "${SCRIPT_DIR}/host/cloudflared-companion.yml" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/cloudflared-companion.yml"
@@ -140,67 +174,41 @@ else
   echo "  cloudflared-companion running."
 fi
 
-# Step 6: Build companion-updater binary locally
-echo "[6/9] Building companion-updater..."
-"${SCRIPT_DIR}/updater/build.sh"
-BIN="${SCRIPT_DIR}/updater/target/release/companion-updater"
-if [ ! -x "${BIN}" ]; then
-  echo "ERROR: ${BIN} not found"
-  exit 1
-fi
-
-# Step 7: Deploy companion-updater binary and systemd unit
-#
-# The binary is deployed BEFORE the Companion upgrade is triggered, so the
-# upgrade always runs through the code in THIS checkout. Doing it the other way
-# round meant a deploy could never fix a bug in the upgrade path itself — the
-# old binary ran the upgrade, and the fix only took effect a deploy later.
-echo "[7/9] Deploying companion-updater..."
-remote "sudo systemctl stop companion-updater 2>/dev/null || true"
-remote_copy "${BIN}" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater"
-remote "sudo install -m 0755 /tmp/companion-updater /usr/local/bin/companion-updater && rm /tmp/companion-updater"
-remote_copy "${SCRIPT_DIR}/updater/companion-updater.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/companion-updater.service"
-remote "sudo install -m 0644 /tmp/companion-updater.service /etc/systemd/system/companion-updater.service && rm /tmp/companion-updater.service"
-remote "sudo systemctl daemon-reload && sudo systemctl enable --now companion-updater"
-echo "  companion-updater deployed."
-
-# Wait for the freshly started updater to serve before driving it.
-for _ in $(seq 1 12); do
-  if remote "curl -sf --max-time 3 http://127.0.0.1:8081/healthz" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 5
-done
-
 # Step 8: Update Companion through the safety-gated updater endpoint.
+# COMPANION_UPGRADE=skip deploys this repo's tooling without upgrading Companion
+# itself (the owner upgrades Companion from the dashboard when he wants to).
 echo "[8/9] Updating Companion via companion-updater (safety-gated)..."
-# Stream the SSE update endpoint. We grep for the first terminal event in the
-# stream: complete = success, safety_rollback = data loss + auto-reverted,
-# error = anything else. The first match wins; we then stop reading.
-#
-# `|| true` swallows the pipeline's exit code: an empty TERMINAL_LINE (curl
-# failure, no terminal event seen, etc.) falls through to the *) case below
-# which prints a clear error. Set -e would otherwise abort the deploy with
-# no diagnostic.
-TERMINAL_LINE="$(remote "curl -fsS --no-buffer --max-time 1800 -H 'Accept: text/event-stream' http://127.0.0.1:8081/api/update/stream 2>&1 | grep -m1 -E '\"type\":\"(complete|error|safety_rollback)\"'" || true)"
-echo "  ${TERMINAL_LINE}"
-case "${TERMINAL_LINE}" in
-  *'"type":"complete"'*)
-    echo "  Companion updated successfully."
-    ;;
-  *'"type":"safety_rollback"'*)
-    echo "  ERROR: data loss detected during upgrade; updater rolled back."
-    exit 1
-    ;;
-  *'"type":"error"'*)
-    echo "  ERROR: upgrade failed (see updater journal: sudo journalctl -u companion-updater -n 100)."
-    exit 1
-    ;;
-  *)
-    echo "  ERROR: did not receive a terminal event from updater."
-    exit 1
-    ;;
-esac
+if [ "${COMPANION_UPGRADE:-}" = "skip" ]; then
+  echo "  COMPANION_UPGRADE=skip: Companion stays at its current version."
+else
+  # Stream the SSE update endpoint. We grep for the first terminal event in the
+  # stream: complete = success, safety_rollback = data loss + auto-reverted,
+  # error = anything else. The first match wins; we then stop reading.
+  #
+  # `|| true` swallows the pipeline's exit code: an empty TERMINAL_LINE (curl
+  # failure, no terminal event seen, etc.) falls through to the *) case below
+  # which prints a clear error. Set -e would otherwise abort the deploy with
+  # no diagnostic.
+  TERMINAL_LINE="$(remote "curl -fsS --no-buffer --max-time 1800 -H 'Accept: text/event-stream' http://127.0.0.1:8081/api/update/stream 2>&1 | grep -m1 -E '\"type\":\"(complete|error|safety_rollback)\"'" || true)"
+  echo "  ${TERMINAL_LINE}"
+  case "${TERMINAL_LINE}" in
+    *'"type":"complete"'*)
+      echo "  Companion updated successfully."
+      ;;
+    *'"type":"safety_rollback"'*)
+      echo "  ERROR: data loss detected during upgrade; updater rolled back."
+      exit 1
+      ;;
+    *'"type":"error"'*)
+      echo "  ERROR: upgrade failed (see updater journal: sudo journalctl -u companion-updater -n 100)."
+      exit 1
+      ;;
+    *)
+      echo "  ERROR: did not receive a terminal event from updater."
+      exit 1
+      ;;
+  esac
+fi
 
 # Step 9: Health check
 echo "[9/9] Waiting for services to be ready..."
