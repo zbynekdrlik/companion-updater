@@ -75,7 +75,7 @@ The deploy script (`[1/9]`…`[9/9]` in its output):
    (binary first, upgrade second — otherwise a fix to the upgrade path could
    never take effect in the deploy that ships it). `COMPANION_UPGRADE=skip`
    deploys the tooling only and leaves Companion at its version
-9. Waits for health checks to pass
+9. Waits for health checks to pass; after a Companion upgrade, with the tunnel running, it checks again that Companion accepts the web UI connection from the tunnel
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
 

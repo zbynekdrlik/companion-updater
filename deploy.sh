@@ -141,7 +141,6 @@ case "${RIG}" in
 esac
 remote_copy "${SCRIPT_DIR}/host/ensure-companion-proxy.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/ensure-companion-proxy.sh"
 remote "sudo install -m 0755 /tmp/ensure-companion-proxy.sh /usr/local/sbin/ensure-companion-proxy.sh && rm /tmp/ensure-companion-proxy.sh"
-TUNNEL_ON=no
 if [ "${COMPANION_TUNNEL:-}" = "skip" ]; then
   echo "  COMPANION_TUNNEL=skip: unit installed, not started."
 elif [ -z "${PUBLIC_HOSTS}" ]; then
@@ -155,8 +154,11 @@ elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
 else
   # Companion must accept the UI's WebSocket from the tunnel, or the page loads
   # and never connects (restarts Companion only when it changes the setting).
-  remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"
-  TUNNEL_ON=yes
+  if ! remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"; then
+    echo "ERROR: Companion on ${RIG} would not accept the web UI connection from the tunnel (see above)."
+    echo "  A rig without /etc/companion/config.yaml needs the Companion upgrade first: COMPANION_TUNNEL=skip ./deploy.sh, then deploy again."
+    exit 1
+  fi
   remote "sudo systemctl enable cloudflared-companion" >/dev/null
   if ! remote "sudo systemctl restart cloudflared-companion"; then
     echo "ERROR: cloudflared-companion did not start on ${RIG} (sudo journalctl -u cloudflared-companion -n 50)"
@@ -248,8 +250,9 @@ if ! curl -sf --max-time 5 "http://${COMPANION_HOST}:8081/healthz" >/dev/null 2>
   exit 1
 fi
 
-# An upgrade in step 8 must not have broken the web UI behind the tunnel.
-if [ "${TUNNEL_ON}" = yes ]; then
+# The step-8 upgrade must not have broken the web UI behind a running tunnel.
+if [ "${COMPANION_UPGRADE:-}" != "skip" ] && [ -n "${UI_HOSTS}" ] \
+   && remote "systemctl is-active --quiet cloudflared-companion"; then
   remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"
 fi
 
