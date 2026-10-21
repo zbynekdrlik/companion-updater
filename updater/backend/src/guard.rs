@@ -36,35 +36,50 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
-    fn with_site(value: &str) -> HeaderMap {
+    fn with(site: Option<&str>, mode: Option<&str>) -> HeaderMap {
         let mut h = HeaderMap::new();
-        h.insert("sec-fetch-site", HeaderValue::from_str(value).unwrap());
+        if let Some(v) = site {
+            h.insert("sec-fetch-site", HeaderValue::from_str(v).unwrap());
+        }
+        if let Some(v) = mode {
+            h.insert("sec-fetch-mode", HeaderValue::from_str(v).unwrap());
+        }
         h
     }
 
     #[test]
     fn a_link_from_another_site_cannot_start_an_upgrade() {
-        let err = reject_cross_site(&with_site("cross-site")).unwrap_err();
+        let err = reject_cross_site(&with(Some("cross-site"), Some("navigate"))).unwrap_err();
         assert_eq!(err.0, StatusCode::FORBIDDEN);
     }
 
     #[test]
     fn a_sibling_newlevel_media_page_cannot_either() {
         assert_eq!(
-            reject_cross_site(&with_site("same-site")).unwrap_err().0,
+            reject_cross_site(&with(Some("same-site"), Some("cors"))).unwrap_err().0,
             StatusCode::FORBIDDEN
         );
     }
 
     #[test]
-    fn the_dashboard_itself_a_bookmark_and_curl_are_allowed() {
-        assert!(reject_cross_site(&with_site("same-origin")).is_ok());
-        assert!(reject_cross_site(&with_site("none")).is_ok());
+    fn a_link_from_mail_or_chat_or_a_bookmark_cannot_either() {
+        // An external app's link, a bookmark and a typed URL all arrive as a
+        // top-level navigation with Sec-Fetch-Site: none.
+        assert_eq!(
+            reject_cross_site(&with(Some("none"), Some("navigate"))).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn the_dashboard_eventsource_and_curl_are_allowed() {
+        assert!(reject_cross_site(&with(Some("same-origin"), Some("cors"))).is_ok());
         assert!(reject_cross_site(&HeaderMap::new()).is_ok());
     }
 
     #[test]
-    fn the_header_value_is_compared_case_insensitively() {
-        assert!(reject_cross_site(&with_site("Cross-Site")).is_err());
+    fn the_header_values_are_compared_case_insensitively() {
+        assert!(reject_cross_site(&with(Some("Cross-Site"), None)).is_err());
+        assert!(reject_cross_site(&with(Some("none"), Some("Navigate"))).is_err());
     }
 }

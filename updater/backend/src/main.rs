@@ -71,18 +71,22 @@ async fn main() {
         update_running: Arc::new(Mutex::new(false)),
     };
 
-    let app = Router::new()
-        .route("/", get(static_files::index))
-        .route("/api/status", get(status_handler))
-        .route("/api/update/stream", get(update_stream_handler))
-        .route("/healthz", get(|| async { "ok" }))
-        .fallback(get(static_files::asset))
-        .with_state(state);
+    let app = router(state);
 
     let addr: SocketAddr = "0.0.0.0:8081".parse().unwrap();
     tracing::info!("companion-updater listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/", get(static_files::index))
+        .route("/api/status", get(status_handler))
+        .route("/api/update/stream", get(update_stream_handler))
+        .route("/healthz", get(|| async { "ok" }))
+        .fallback(get(static_files::asset))
+        .with_state(state)
 }
 
 async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
@@ -187,4 +191,52 @@ async fn update_stream_handler(
     });
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    /// Requests go through the real router. The state says an update is
+    /// already running, so a request that gets past the guard answers 409
+    /// and never spawns an upgrade on the machine running the tests.
+    async fn upgrade_request(headers: &[(&str, &str)]) -> StatusCode {
+        let state = AppState {
+            http: reqwest::Client::new(),
+            last_update: Arc::new(Mutex::new(None)),
+            update_running: Arc::new(Mutex::new(true)),
+        };
+        let mut req = Request::builder().uri("/api/update/stream");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        router(state)
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn the_stream_endpoint_refuses_a_cross_site_request() {
+        let status =
+            upgrade_request(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate")]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_stream_endpoint_refuses_a_link_opened_from_another_app() {
+        let status =
+            upgrade_request(&[("sec-fetch-site", "none"), ("sec-fetch-mode", "navigate")]).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn the_dashboard_eventsource_gets_past_the_guard() {
+        let status = upgrade_request(&[("sec-fetch-site", "same-origin"), ("sec-fetch-mode", "cors")]).await;
+        assert_eq!(status, StatusCode::CONFLICT, "past the guard, stopped by the running-update check");
+    }
 }
