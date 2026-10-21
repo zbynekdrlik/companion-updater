@@ -102,25 +102,25 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
     let update_running = *state.update_running.lock().await;
     let can_update = cooldown_remaining == 0 && !update_running;
 
-    let (current_version, latest_version, update_available, error) = match (current_raw, latest_raw)
-    {
-        (Ok(c), Ok(l)) => {
-            let avail = version::is_update_available(&c, &l);
-            (version::format(&c), version::format(&l), avail, None)
-        }
-        (Err(e), _) => (
-            "unknown".into(),
-            "unknown".into(),
-            false,
-            Some(format!("Cannot read installed version: {e}")),
-        ),
-        (Ok(c), Err(e)) => (
-            version::format(&c),
-            "unknown".into(),
-            false,
-            Some(format!("Cannot fetch latest version: {e}")),
-        ),
-    };
+    let (current_version, latest_version, update_available, error) =
+        match (current_raw, latest_raw) {
+            (Ok(c), Ok(l)) => {
+                let avail = version::is_update_available(&c, &l);
+                (version::format(&c), version::format(&l), avail, None)
+            }
+            (Err(e), _) => (
+                "unknown".into(),
+                "unknown".into(),
+                false,
+                Some(format!("Cannot read installed version: {e}")),
+            ),
+            (Ok(c), Err(e)) => (
+                version::format(&c),
+                "unknown".into(),
+                false,
+                Some(format!("Cannot fetch latest version: {e}")),
+            ),
+        };
 
     Json(StatusResponse {
         current_version,
@@ -139,13 +139,18 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
 async fn update_stream_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
-{
+) -> Result<
+    Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, String),
+> {
     guard::reject_cross_site(&headers)?;
     {
         let mut running = state.update_running.lock().await;
         if *running {
-            return Err((StatusCode::CONFLICT, "Update already in progress".into()));
+            return Err((
+                StatusCode::CONFLICT,
+                "Update already in progress".into(),
+            ));
         }
         let last = state.last_update.lock().await;
         if let Some(t) = *last {
