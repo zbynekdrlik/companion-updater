@@ -8,6 +8,7 @@ fake answering the same paths with the same shapes as the real API, seeded
 with the state found on 2026-10-21 (ids and e-mails are placeholders).
 """
 import base64
+import contextlib
 import copy
 import importlib.util
 import io
@@ -46,7 +47,11 @@ class FakeCloudflare:
                 {"hostname": "companion-pp.newlevel.media", "service": "http://localhost:8000"},
                 {"service": "http_status:404"},
             ]}},
-            # The presenter project's tunnel on the pp rig (cloudflared.service).
+            # The presenter project's tunnels on the rigs (cloudflared.service).
+            "tun-presenter-prod": {"name": "presenter-prod", "status": "healthy", "connections": [{}], "config": {"ingress": [
+                {"hostname": "presenter-snv.newlevel.media", "service": "http://localhost:80"},
+                {"service": "http_status:404"},
+            ]}},
             "tun-presenter-pp": {"name": "presenter-pp", "status": "healthy", "connections": [{}], "config": {"ingress": [
                 {"hostname": "presenter-pp.newlevel.media", "service": "http://localhost:3000"},
                 {"service": "http_status:404"},
@@ -82,7 +87,7 @@ class FakeCloudflare:
             return [{"id": "zone1", "account": {"id": "acc1"}}]
         if base == "/accounts/acc1/cfd_tunnel":
             assert params.get("is_deleted") == "false", "deleted tunnels must be excluded"
-            return [{"id": tid, "name": t["name"], "status": t["status"], "connections": t["connections"], "remote_config": True}
+            return [{"id": tid, "name": t["name"], "status": t["status"], "connections": t["connections"], "remote_config": t.get("remote_config", True)}
                     for tid, t in self.tunnels.items() if t["name"] == params.get("name")]
         for tid, t in self.tunnels.items():
             if base == f"/accounts/acc1/cfd_tunnel/{tid}/configurations":
@@ -414,6 +419,32 @@ class RunAgainstTheFoundState(unittest.TestCase):
                 cf.tunnels["tun-presenter-pp"]["config"]["ingress"].insert(0, {"hostname": "x.newlevel.media", "service": service})
                 self.assert_stops_without_writing(cf, f"tunnel presenter-pp (not ours; it runs on a Companion rig) routes x.newlevel.media to {service}")
 
+    def test_a_neighbour_rule_that_can_reach_any_port_stops_the_run(self):
+        rules = {
+            "bastion": {"hostname": "x.newlevel.media", "service": "bastion"},
+            "socks5": {"hostname": "x.newlevel.media", "service": "socks5"},
+            "bastionMode": {"hostname": "x.newlevel.media", "service": "ssh://localhost:22", "originRequest": {"bastionMode": True}},
+            "proxyType socks": {"hostname": "x.newlevel.media", "service": "http://localhost:80", "originRequest": {"proxyType": "socks"}},
+        }
+        for name, rule in rules.items():
+            with self.subTest(rule=name):
+                cf = FakeCloudflare()
+                cf.tunnels["tun-presenter-prod"]["config"]["ingress"].insert(0, rule)
+                self.assert_stops_without_writing(cf, "tunnel presenter-prod (not ours; it runs on a Companion rig) can reach any port")
+
+    def test_an_unreadable_neighbour_service_stops_the_run(self):
+        cf = FakeCloudflare()
+        cf.tunnels["tun-presenter-pp"]["config"]["ingress"].insert(0, {"hostname": "x.newlevel.media", "service": "http://localhost:99999"})
+        self.assert_stops_without_writing(cf, "cannot read")
+
+    def test_a_missing_or_locally_managed_neighbour_stops_the_run(self):
+        cf = FakeCloudflare()
+        del cf.tunnels["tun-presenter-prod"]
+        self.assert_stops_without_writing(cf, "neighbour tunnel presenter-prod not found")
+        cf = FakeCloudflare()
+        cf.tunnels["tun-presenter-pp"]["remote_config"] = False
+        self.assert_stops_without_writing(cf, "presenter-pp is managed on the rig")
+
     def test_the_neighbour_tunnels_are_read_and_never_written(self):
         cf = FakeCloudflare()
         cfc.run(cf, apply=True, out=quiet)
@@ -427,6 +458,12 @@ class RunAgainstTheFoundState(unittest.TestCase):
 
 
 class Status(unittest.TestCase):
+    def test_status_reads_only_the_companion_tunnels(self):
+        cf = FakeCloudflare()
+        del cf.tunnels["tun-presenter-prod"]  # a neighbour problem is plan's business, not status's
+        cfc.status(cf, out=lambda _l: None)
+        self.assertFalse([p for _m, p, _b in cf.calls if "presenter" in p], "status must not read the neighbour tunnels")
+
     def test_counts_unhealthy_tunnels(self):
         cf = FakeCloudflare()
         lines = []
@@ -578,6 +615,25 @@ class Main(unittest.TestCase):
             t["status"], t["connections"] = "healthy", [{}]
         self.assertEqual(cfc.main(["x", "status"], cf=cf), 0)
         self.assertEqual(cfc.main(["x", "bogus"], cf=cf), 2)
+
+    def test_hosts_lists_a_rigs_hostnames_from_the_tunnel_map_without_any_token(self):
+        os.environ["CF_TOKEN_FILE"] = "/nonexistent/companion-test-token"
+        try:
+            cases = {
+                ("hosts", "companion-snv"): "companion-snv.newlevel.media companion.newlevel.media companion-update-snv.newlevel.media",
+                ("hosts", "companion-snv", "--ui"): "companion-snv.newlevel.media companion.newlevel.media",
+                ("hosts", "linux-pp"): "companion-pp.newlevel.media companion-update-pp.newlevel.media",
+                ("hosts", "linux-pp", "--ui"): "companion-pp.newlevel.media",
+                ("hosts", "some-other-box"): "",
+            }
+            for args, want in cases.items():
+                with self.subTest(args=args):
+                    out = io.StringIO()
+                    with contextlib.redirect_stdout(out):
+                        self.assertEqual(cfc.main(["x", *args]), 0)
+                    self.assertEqual(out.getvalue(), want + "\n")
+        finally:
+            del os.environ["CF_TOKEN_FILE"]
 
     def test_apply_that_does_not_converge_is_an_error(self):
         cf = FakeCloudflare()
