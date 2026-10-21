@@ -7,7 +7,8 @@ set -euo pipefail
 #
 # Architecture:
 #   - Companion: native systemd service (companion-pi)
-#   - Cloudflare tunnel: native systemd service (cloudflared)
+#   - Web access: cloudflared-companion.service (own tunnel, behind Cloudflare Access;
+#     cloudflared.service on the rigs is the presenter project's tunnel)
 #   - Update Dashboard: native systemd service (companion-updater Rust binary)
 
 COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
@@ -82,19 +83,53 @@ else
 fi
 
 # Step 5: Companion web UI tunnel (companion-updater#26). Its own unit next to
-# the presenter's cloudflared.service; started only once the tunnel token is
-# installed (host/cloudflare_companion.py install-token <tunnel> <host>).
+# the presenter's cloudflared.service. A rig without the tunnel token fails the
+# deploy (that silent state is how the tunnels sat dead for weeks); a deliberate
+# deploy without web access sets COMPANION_TUNNEL=skip.
 echo "[5/9] Installing the Companion web UI tunnel..."
 remote_copy "${SCRIPT_DIR}/host/cloudflared-companion.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/cloudflared-companion.service"
 remote "sudo install -m 0644 /tmp/cloudflared-companion.service /etc/systemd/system/cloudflared-companion.service && rm /tmp/cloudflared-companion.service"
 remote "sudo systemctl daemon-reload"
-if remote "sudo test -f /etc/cloudflared-companion.env"; then
-  remote "sudo systemctl enable cloudflared-companion && sudo systemctl restart cloudflared-companion"
-  remote "systemctl is-active --quiet cloudflared-companion" || { echo "ERROR: cloudflared-companion did not start (sudo journalctl -u cloudflared-companion -n 50)"; exit 1; }
-  echo "  cloudflared-companion running."
+RIG="$(remote hostname)"
+case "${RIG}" in
+  companion-snv) PUBLIC_HOST="companion-snv.newlevel.media" ;;
+  linux-pp) PUBLIC_HOST="companion-pp.newlevel.media" ;;
+  *) PUBLIC_HOST="" ;;
+esac
+if [ "${COMPANION_TUNNEL:-}" = "skip" ]; then
+  echo "  COMPANION_TUNNEL=skip: unit installed, not started."
+elif [ -z "${PUBLIC_HOST}" ]; then
+  echo "ERROR: ${COMPANION_HOST} is '${RIG}', which has no web hostname (add it to deploy.sh and host/cloudflare_companion.py, or set COMPANION_TUNNEL=skip)"
+  exit 1
+elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
+  echo "ERROR: no tunnel token on ${RIG}. Run on dev1:"
+  echo "  COMPANION_PASS=... host/cloudflare_companion.py install-token ${COMPANION_HOST}"
+  echo "  (or deploy without web access: COMPANION_TUNNEL=skip)"
+  exit 1
 else
-  echo "  Tunnel unit installed but NOT started: no tunnel token yet."
-  echo "  Run on dev1:  COMPANION_PASS=... host/cloudflare_companion.py install-token <companion-snv|companion-pp> ${COMPANION_HOST}"
+  remote "sudo systemctl enable cloudflared-companion" >/dev/null
+  if ! remote "sudo systemctl restart cloudflared-companion"; then
+    echo "ERROR: cloudflared-companion did not start on ${RIG} (sudo journalctl -u cloudflared-companion -n 50)"
+    exit 1
+  fi
+  sleep 5   # a crash right after READY shows up here, not in the restart itself
+  if ! remote "systemctl is-active --quiet cloudflared-companion"; then
+    echo "ERROR: cloudflared-companion died after starting on ${RIG} (sudo journalctl -u cloudflared-companion -n 50)"
+    exit 1
+  fi
+  # The public URL must answer with the Access login. A 200 would mean the rig is
+  # reachable without login: stop the tunnel at once.
+  answer="$(curl -s -o /dev/null -m 20 -w '%{http_code} %{redirect_url}' "https://${PUBLIC_HOST}/" || true)"
+  case "${answer}" in
+    302\ *cloudflareaccess.com*) echo "  cloudflared-companion running; https://${PUBLIC_HOST} asks for the Access login." ;;
+    200\ *)
+      remote "sudo systemctl stop cloudflared-companion"
+      echo "ERROR: https://${PUBLIC_HOST} answered 200 WITHOUT login; tunnel stopped. Run host/cloudflare_companion.py plan."
+      exit 1 ;;
+    *)
+      echo "ERROR: https://${PUBLIC_HOST} answered '${answer}', not the Access login (host/cloudflare_companion.py status / plan)"
+      exit 1 ;;
+  esac
 fi
 
 # Step 6: Build companion-updater binary locally

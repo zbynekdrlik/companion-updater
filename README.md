@@ -5,7 +5,7 @@ Production setup for [Bitfocus Companion](https://bitfocus.io/companion) with US
 ## Architecture
 
 - **Companion**: Native systemd service via [companion-pi](https://github.com/bitfocus/companion-pi) — direct USB/udev access for reliable Stream Deck hot-plug detection
-- **Cloudflare Tunnel**: Native systemd service for remote access without port forwarding
+- **Cloudflare Tunnel + Access**: `cloudflared-companion.service` publishes the Companion UI and the update dashboard behind Cloudflare Access (owner e-mail, one-time PIN)
 - **Update Dashboard**: Native Rust binary (axum + Leptos/WASM) for checking and applying Companion updates, with a pre/post upgrade safety gate that auto-rolls back on data loss
 - **Off-machine Backups**: Hourly push of the Companion config to a private GitHub repo (`zbynekdrlik/companion-backups`), 30-day history retention
 - **Persistent Data**: Configuration stored at `~companion/.config/companion-nodejs/`
@@ -101,15 +101,30 @@ Repository:
 
 ## Configuration
 
-### Cloudflare Tunnel
+### Web access over Cloudflare
 
-Install cloudflared natively on the host:
+| URL | Rig | Service |
+|---|---|---|
+| https://companion-snv.newlevel.media | companion-snv | Companion UI (:8000) |
+| https://companion-update-snv.newlevel.media | companion-snv | Update dashboard (:8081) |
+| https://companion-pp.newlevel.media | companion-pp | Companion UI (:8000) |
+| https://companion-update-pp.newlevel.media | companion-pp | Update dashboard (:8081) |
+
+Every URL is behind Cloudflare Access: one-time PIN to the owner's e-mail, with a 30-day session like the other newlevel apps. cloudflared on the rig rejects any request without a valid Access token as well.
+
+**Never run `cloudflared service install <token>` for companion.** It rewrites `cloudflared.service`, which on these rigs belongs to the presenter project's tunnel. That command is how the companion tunnels went down unnoticed before. Companion runs its own unit, `cloudflared-companion.service`.
 
 ```bash
-sudo cloudflared service install <TUNNEL_TOKEN>
+# Cloudflare side (Access apps, tunnel ingress, DNS, the tunnel-health e-mail): as code, idempotent
+COMPANION_ACCESS_EMAILS=<owner e-mail> host/cloudflare_companion.py plan    # exit 3 = changes pending
+COMPANION_ACCESS_EMAILS=<owner e-mail> host/cloudflare_companion.py apply
+host/cloudflare_companion.py status                                         # exit 1 = a tunnel is down
+
+# The rig's run token (the tunnel is chosen from the rig's hostname; never printed)
+COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
 ```
 
-Get the token from [Cloudflare Zero Trust](https://one.dash.cloudflare.com/) → Networks → Tunnels.
+Then `deploy.sh` installs the unit. It fails if the tunnel token is missing (opt out with `COMPANION_TUNNEL=skip`) or if the public URL does not answer with the Access login.
 
 ## Ports
 
@@ -150,10 +165,13 @@ sudo journalctl -u companion --no-pager -n 100
 
 ### Cloudflare tunnel not working
 ```bash
-# Check tunnel service
-sudo systemctl status cloudflared
-# Check tunnel logs
-sudo journalctl -u cloudflared --no-pager -n 50
+# From dev1: tunnel health as Cloudflare sees it
+host/cloudflare_companion.py status
+# Anonymous request must get the Access login (302 to newlevelchurch.cloudflareaccess.com)
+curl -sI https://companion-snv.newlevel.media | head -3
+# On the rig (NOT cloudflared.service: that one is the presenter's tunnel)
+sudo systemctl status cloudflared-companion
+sudo journalctl -u cloudflared-companion --no-pager -n 50
 ```
 
 ### Update Dashboard issues

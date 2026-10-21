@@ -79,10 +79,24 @@ The NTP server comes from DHCP:
 
 ## Web UI over Cloudflare (#26)
 
-- **What serves what.** `https://companion-snv.newlevel.media` and `https://companion-pp.newlevel.media` serve the rig's Companion UI (`http://localhost:8000`). Each is behind Cloudflare Access with one-time-PIN e-mail login for the owner. The app session is 730h (30 days), like the other newlevel apps; that was the owner's choice on 2026-10-21, after 120 days had been offered. A device that is logged in to any newlevel app gets in through the Access organisation's shared login without another PIN. There is no other identity provider and no WARP enrolment in the account. The older alias `companion.newlevel.media` still works and keeps the owner's hand-made Access app "newlevel".
+- **What serves what.**
+  - `companion-snv.newlevel.media` and `companion-pp.newlevel.media` serve the Companion UI on `:8000`.
+  - `companion-update-snv.newlevel.media` and `companion-update-pp.newlevel.media` serve the updater dashboard on `:8081`.
+  - The older alias `companion.newlevel.media` → snv `:8000` keeps the owner's hand-made Access app "newlevel". The tool only checks that app; it never changes it.
+- **Login.** Every host is behind Cloudflare Access: one-time PIN to the owner's e-mail, reusable policy "Companion owner (OTP email) · claude", 730h session like the other newlevel apps (owner's choice of 2026-10-21; 120 days was offered and declined). A device logged in to any newlevel app gets in through the organisation's shared login without another PIN. The account has no other identity provider and no WARP.
+- **Second layer.** Each ingress rule also has `originRequest.access.required` with the app's aud, so cloudflared on the rig itself rejects requests without a valid Access token, even if the Access app is deleted or loosened.
 - **The rig's `cloudflared.service` belongs to the presenter project** (tunnels presenter-prod / presenter-pp).
-  - `cloudflared service install <token>` rewrites exactly that unit. That is how the companion tunnels went down unnoticed. Never use it for companion.
-  - The companion tunnel runs as its own unit, `cloudflared-companion.service` (host/), with `TUNNEL_TOKEN` in `/etc/cloudflared-companion.env` (root 0600). `deploy.sh` step 5 installs the unit and starts it only when that env file exists.
-- **Cloudflare-side state is code.** Tunnel ingress, DNS CNAMEs and Access apps live in `host/cloudflare_companion.py plan|apply`. It reads the account-owned API token from `$CF_TOKEN_FILE`; the default is the `cloudflare-newlevel-full` key file in the secrets dir. `install-token <tunnel> <ssh-host>` writes the run token to the rig without printing it.
-- **Outage alert.** A Cloudflare notification, "Companion tunnels down · claude" (`tunnel_health_event`, both tunnel ids, status DOWN), e-mails the owner. It exists because the tunnels sat dead for weeks unnoticed.
-- **Verify.** An anonymous request must get the Access login: a 302 to `newlevelchurch.cloudflareaccess.com`. Then check a browser login. A tunnel shown as `down` in the Cloudflare API means nothing on the rig runs it.
+  - `cloudflared service install <token>` rewrites exactly that unit. That is how the companion tunnels sat dead unnoticed for weeks. Never use it for companion.
+  - Companion runs its own `cloudflared-companion.service` (host/): `Restart=always`, DynamicUser, `TUNNEL_TOKEN` in `/etc/cloudflared-companion.env` (root 0600).
+- **Cloudflare-side state is code: `host/cloudflare_companion.py`.**
+  - `plan` (exit 3 = changes pending), `apply` (re-plans and must end clean), `status` (exit 1 = a tunnel is down).
+  - It needs `COMPANION_ACCESS_EMAILS` = the owner's e-mail. That value is kept out of this public repo; see local memory.
+  - It writes in a safe order: Access policy and apps → alert → ingress → DNS. Every conflict is checked before the first write, so a hostname is never routed before its app exists.
+  - The API token comes from `$CF_TOKEN_FILE`; the default is the `cloudflare-newlevel-full` key file in the secrets dir.
+- **Run token.** `install-token <ssh-host>` picks the tunnel from the rig's `hostname` (companion-snv / linux-pp), so the snv token can never land on pp. It checks that the token's `t` is that tunnel, writes it over stdin, and restarts the unit.
+- **`deploy.sh` step 5** installs the unit and FAILS when:
+  - the token is missing (opt out with `COMPANION_TUNNEL=skip`);
+  - the unit dies;
+  - or the public URL does not answer `302` to `newlevelchurch.cloudflareaccess.com`.
+  A `200` (public without login) stops the tunnel at once.
+- **Outage alert.** The notification "Companion tunnels health · claude" (`tunnel_health_event`, both tunnel ids, NO status filter) e-mails the owner on every health change. The status filter's value format is undocumented, and a wrong value would never fire. Proof that it fires: `GET /accounts/{acc}/alerting/v3/history` after a controlled stop.

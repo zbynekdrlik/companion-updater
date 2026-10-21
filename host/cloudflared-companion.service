@@ -14,11 +14,23 @@ ConditionPathExists=/etc/cloudflared-companion.env
 
 [Service]
 Type=notify
-TimeoutStartSec=15
+# First edge registration on a slow uplink at boot can take longer than 15 s.
+TimeoutStartSec=60
+# PID 1 reads the root-0600 file before dropping to the dynamic user.
 EnvironmentFile=/etc/cloudflared-companion.env
+# /usr/local/bin/cloudflared is a symlink to this file on both rigs; the binary is
+# kept up to date by cloudflared-update.timer.
 ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
-Restart=on-failure
+# always: cloudflared exits 0 on SIGTERM, so a `pkill cloudflared` aimed at the
+# presenter's tunnel would otherwise leave this one down until a reboot.
+Restart=always
 RestartSec=5s
+# cloudflared needs no root and no state in token mode.
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
