@@ -82,6 +82,12 @@ POLICY_NAME = "Companion owner (OTP email) · claude"
 SESSION_DURATION = "730h"
 DNS_COMMENT = "companion-updater#26 · claude"
 ALERT_NAME = "Companion tunnels health · claude"
+# The other tunnels running on the rigs: the presenter project's cloudflared.service.
+# Companion trusts every loopback client as its proxy (trustedProxies: loopback, see
+# host/ensure-companion-proxy.sh), so one of these routing to Companion or the
+# updater would publish them under that project's Access. Checked, never changed.
+RIG_NEIGHBOUR_TUNNELS = ["presenter-prod", "presenter-pp"]
+RIG_PORTS = (8000, 8081)
 ENV_FILE = "/etc/cloudflared-companion.env"
 UNIT = "cloudflared-companion"
 
@@ -288,6 +294,20 @@ def alert_plan(policies, payload):
     return ("update", pol.get("id"), f"notification '{payload['name']}': " + "; ".join(diffs))
 
 
+def neighbour_problem(name, config):
+    """A rule in another tunnel on the rigs that reaches Companion's or the updater's port."""
+    for rule in (config or {}).get("ingress") or []:
+        service = rule.get("service") or ""
+        try:
+            port = urllib.parse.urlsplit(service).port if "://" in service else None
+        except ValueError:
+            port = None
+        if port in RIG_PORTS:
+            return (f"tunnel {name} (not ours; it runs on a Companion rig) routes {rule.get('hostname') or '*'} to {service}. "
+                    "Companion trusts local proxies, so that publishes it under another Access app; fix that tunnel first")
+    return None
+
+
 def tunnel_id_from_token(token):
     """The tunnel id (`t`) inside a cloudflared run token (base64 JSON)."""
     padded = token + "=" * (-len(token) % 4)
@@ -379,6 +399,12 @@ def gather(cf):
             raise CloudflareError(f"tunnel {name} is not remotely managed; its ingress lives on the rig")
         conf = cf.call("GET", f"/accounts/{acc}/cfd_tunnel/{t['id']}/configurations")
         st["tunnels"][name] = {"id": t["id"], "status": t.get("status"), "connections": len(t.get("connections") or []), "config": (conf or {}).get("config") or {}}
+    st["neighbours"] = {}
+    for name in RIG_NEIGHBOUR_TUNNELS:
+        found = cf.call("GET", f"/accounts/{acc}/cfd_tunnel?name={q(name)}&is_deleted=false")
+        if found:
+            conf = cf.call("GET", f"/accounts/{acc}/cfd_tunnel/{found[0]['id']}/configurations")
+            st["neighbours"][name] = (conf or {}).get("config") or {}
     idps = [i for i in cf.call("GET", f"/accounts/{acc}/access/identity_providers") if i.get("type") == "onetimepin"]
     if not idps:
         raise CloudflareError("no one-time-PIN identity provider in the account")
@@ -408,6 +434,11 @@ def run(cf, apply, out=print):
         problem = alias_check(st["apps"][alias], alias)
         if problem:
             raise CloudflareError(problem)
+    for name, config in st["neighbours"].items():
+        problem = neighbour_problem(name, config)
+        if problem:
+            raise CloudflareError(problem)
+        out(f"ok      neighbour tunnel {name}: nothing routed to Companion or the updater")
     dns_steps = []
     our_targets = {f"{t['id']}.cfargotunnel.com" for t in st["tunnels"].values()}
     for name, rules in TUNNELS.items():

@@ -129,11 +129,18 @@ remote "sudo systemctl daemon-reload"
 RIG="$(remote hostname)"
 # Every hostname the rig's tunnel serves (keep in sync with TUNNELS in
 # host/cloudflare_companion.py); each must answer with the Access login.
+# UI_HOSTS are the ones serving the Companion UI itself.
 case "${RIG}" in
-  companion-snv) PUBLIC_HOSTS="companion-snv.newlevel.media companion-update-snv.newlevel.media companion.newlevel.media" ;;
-  linux-pp) PUBLIC_HOSTS="companion-pp.newlevel.media companion-update-pp.newlevel.media" ;;
-  *) PUBLIC_HOSTS="" ;;
+  companion-snv)
+    PUBLIC_HOSTS="companion-snv.newlevel.media companion-update-snv.newlevel.media companion.newlevel.media"
+    UI_HOSTS="companion-snv.newlevel.media companion.newlevel.media" ;;
+  linux-pp)
+    PUBLIC_HOSTS="companion-pp.newlevel.media companion-update-pp.newlevel.media"
+    UI_HOSTS="companion-pp.newlevel.media" ;;
+  *) PUBLIC_HOSTS=""; UI_HOSTS="" ;;
 esac
+remote_copy "${SCRIPT_DIR}/host/ensure-companion-proxy.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/ensure-companion-proxy.sh"
+remote "sudo install -m 0755 /tmp/ensure-companion-proxy.sh /usr/local/sbin/ensure-companion-proxy.sh && rm /tmp/ensure-companion-proxy.sh"
 if [ "${COMPANION_TUNNEL:-}" = "skip" ]; then
   echo "  COMPANION_TUNNEL=skip: unit installed, not started."
 elif [ -z "${PUBLIC_HOSTS}" ]; then
@@ -145,6 +152,13 @@ elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
   echo "  (or deploy without web access: COMPANION_TUNNEL=skip)"
   exit 1
 else
+  # Companion must accept the UI's WebSocket from the tunnel, or the page loads
+  # and never connects (restarts Companion only when it changes the setting).
+  if ! remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"; then
+    echo "ERROR: Companion on ${RIG} would not accept the web UI connection from the tunnel (see above)."
+    echo "  A rig without /etc/companion/config.yaml needs the Companion upgrade first: COMPANION_TUNNEL=skip ./deploy.sh, then deploy again."
+    exit 1
+  fi
   remote "sudo systemctl enable cloudflared-companion" >/dev/null
   if ! remote "sudo systemctl restart cloudflared-companion"; then
     echo "ERROR: cloudflared-companion did not start on ${RIG} (sudo journalctl -u cloudflared-companion -n 50)"
@@ -234,6 +248,12 @@ if ! curl -sf --max-time 5 "http://${COMPANION_HOST}:8081/healthz" >/dev/null 2>
   echo "WARNING: companion-updater did not become ready within ${MAX_WAIT}s"
   echo "  Check: ssh ${COMPANION_USER}@${COMPANION_HOST} sudo journalctl -u companion-updater -n 50"
   exit 1
+fi
+
+# The step-8 upgrade must not have broken the web UI behind a running tunnel.
+if [ "${COMPANION_UPGRADE:-}" != "skip" ] && [ -n "${UI_HOSTS}" ] \
+   && remote "systemctl is-active --quiet cloudflared-companion"; then
+  remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"
 fi
 
 HOST_IP=$(remote "hostname -I | awk '{print \$1}'" 2>/dev/null || echo "${COMPANION_HOST}")

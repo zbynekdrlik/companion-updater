@@ -70,12 +70,12 @@ The deploy script (`[1/9]`…`[9/9]` in its output):
 4. Installs the backup pusher (script + systemd timer)
 5. Builds the `companion-updater` Rust binary locally
 6. Installs it as a systemd service
-7. Installs and starts the web access tunnel (`cloudflared-companion.service`), after the updater so the public dashboard is never served without its cross-site guard. It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
+7. Sets Companion's `trustedProxies: loopback` (restarting Companion only when that changes) and installs and starts the web access tunnel (`cloudflared-companion.service`), after the updater so the public dashboard is never served without its cross-site guard. It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when Companion refuses the web UI connection from the tunnel, when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
 8. Triggers the Companion upgrade through that freshly deployed updater
    (binary first, upgrade second — otherwise a fix to the upgrade path could
    never take effect in the deploy that ships it). `COMPANION_UPGRADE=skip`
    deploys the tooling only and leaves Companion at its version
-9. Waits for health checks to pass
+9. Waits for health checks to pass; after a Companion upgrade, with the tunnel running, it checks again that Companion accepts the web UI connection from the tunnel
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
 
@@ -120,6 +120,8 @@ Every URL is behind Cloudflare Access with a one-time PIN by e-mail:
 
 cloudflared on the rig also rejects any request without a valid Access token for that hostname's app.
 
+Companion itself has `trustedProxies: loopback` in `/etc/companion/config.yaml`. Without it, Companion 5 refuses the UI's live WebSocket from cloudflared (a loopback client with the public Host), and the page loads but stays on "connecting". `deploy.sh` sets it via `host/ensure-companion-proxy.sh` and checks the handshake.
+
 **Never run `cloudflared service install <token>` for companion.** It rewrites `cloudflared.service`, which on these rigs belongs to the presenter project's tunnel. That command is how the companion tunnels went down unnoticed before. Companion runs its own unit, `cloudflared-companion.service`.
 
 ```bash
@@ -132,7 +134,7 @@ host/cloudflare_companion.py status                                         # ex
 COMPANION_ACCESS_EMAILS=<owner e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
 ```
 
-Then `deploy.sh` installs the unit. It fails if the tunnel token is missing (opt out with `COMPANION_TUNNEL=skip`) or if the public URL does not answer with the Access login.
+Then `deploy.sh` installs the unit. It fails if the tunnel token is missing (opt out with `COMPANION_TUNNEL=skip`), if the public URL does not answer with the Access login, or if Companion refuses the web UI connection from the tunnel.
 
 ## Ports
 
@@ -180,6 +182,9 @@ curl -sI https://companion-snv.newlevel.media | head -3
 # On the rig (NOT cloudflared.service: that one is the presenter's tunnel)
 sudo systemctl status cloudflared-companion
 sudo journalctl -u cloudflared-companion --no-pager -n 50
+# Page loads but stays on "connecting": Companion refused the UI's WebSocket
+sudo journalctl -u companion --no-pager | grep 'Rejected tRPC'
+sudo /usr/local/sbin/ensure-companion-proxy.sh companion-snv.newlevel.media   # sets + checks trustedProxies
 ```
 
 ### Update Dashboard issues

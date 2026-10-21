@@ -46,6 +46,11 @@ class FakeCloudflare:
                 {"hostname": "companion-pp.newlevel.media", "service": "http://localhost:8000"},
                 {"service": "http_status:404"},
             ]}},
+            # The presenter project's tunnel on the pp rig (cloudflared.service).
+            "tun-presenter-pp": {"name": "presenter-pp", "status": "healthy", "connections": [{}], "config": {"ingress": [
+                {"hostname": "presenter-pp.newlevel.media", "service": "http://localhost:3000"},
+                {"service": "http_status:404"},
+            ]}},
         }
         self.dns = [
             {"id": "r1", "type": "CNAME", "name": "companion.newlevel.media", "content": f"{SNV}.cfargotunnel.com", "proxied": True},
@@ -401,6 +406,19 @@ class RunAgainstTheFoundState(unittest.TestCase):
         cf = FakeCloudflare()
         cf.dns.append({"id": "r9", "type": "CNAME", "name": "companion-snv.newlevel.media", "content": "elsewhere.example.com", "proxied": True})
         self.assert_stops_without_writing(cf, "not ours")
+
+    def test_another_tunnel_on_a_rig_reaching_companion_or_the_updater_stops_the_run(self):
+        for service in ("http://localhost:8081", "http://companion-pp.lan:8000"):
+            with self.subTest(service=service):
+                cf = FakeCloudflare()
+                cf.tunnels["tun-presenter-pp"]["config"]["ingress"].insert(0, {"hostname": "x.newlevel.media", "service": service})
+                self.assert_stops_without_writing(cf, f"tunnel presenter-pp (not ours; it runs on a Companion rig) routes x.newlevel.media to {service}")
+
+    def test_the_neighbour_tunnels_are_read_and_never_written(self):
+        cf = FakeCloudflare()
+        cfc.run(cf, apply=True, out=quiet)
+        self.assertIn(("GET", "/accounts/acc1/cfd_tunnel/tun-presenter-pp/configurations", None), cf.calls)
+        self.assertFalse([p for _m, p in cf.writes() if "tun-presenter-pp" in p])
 
     def test_an_unprotected_alias_stops_the_run(self):
         cf = FakeCloudflare()
