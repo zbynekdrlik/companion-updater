@@ -16,6 +16,7 @@ import json
 import os
 import unittest
 import urllib.error
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("cfc", os.path.join(HERE, "cloudflare_companion.py"))
@@ -422,7 +423,7 @@ class RunAgainstTheFoundState(unittest.TestCase):
     def test_a_neighbour_rule_that_can_reach_any_port_stops_the_run(self):
         rules = {
             "bastion": {"hostname": "x.newlevel.media", "service": "bastion"},
-            "socks5": {"hostname": "x.newlevel.media", "service": "socks5"},
+            "socks-proxy": {"hostname": "x.newlevel.media", "service": "socks-proxy"},
             "bastionMode": {"hostname": "x.newlevel.media", "service": "ssh://localhost:22", "originRequest": {"bastionMode": True}},
             "proxyType socks": {"hostname": "x.newlevel.media", "service": "http://localhost:80", "originRequest": {"proxyType": "socks"}},
         }
@@ -431,6 +432,34 @@ class RunAgainstTheFoundState(unittest.TestCase):
                 cf = FakeCloudflare()
                 cf.tunnels["tun-presenter-prod"]["config"]["ingress"].insert(0, rule)
                 self.assert_stops_without_writing(cf, "tunnel presenter-prod (not ours; it runs on a Companion rig) can reach any port")
+
+    def test_tunnel_wide_any_port_settings_and_warp_routing_stop_the_run(self):
+        shapes = {
+            "tunnel-wide bastionMode": ("originRequest", {"bastionMode": True}, "can reach any port"),
+            "tunnel-wide socks": ("originRequest", {"proxyType": "socks"}, "can reach any port"),
+            "warp routing": ("warp-routing", {"enabled": True}, "WARP routing"),
+        }
+        for name, (key, value, needle) in shapes.items():
+            with self.subTest(shape=name):
+                cf = FakeCloudflare()
+                cf.tunnels["tun-presenter-pp"]["config"][key] = value
+                self.assert_stops_without_writing(cf, needle)
+
+    def test_a_neighbour_service_the_check_does_not_know_stops_the_run(self):
+        cf = FakeCloudflare()
+        cf.tunnels["tun-presenter-pp"]["config"]["ingress"].insert(0, {"hostname": "x.newlevel.media", "service": "new-thing"})
+        self.assert_stops_without_writing(cf, "does not know")
+
+    def test_harmless_neighbour_services_pass(self):
+        cf = FakeCloudflare()
+        cf.tunnels["tun-presenter-pp"]["config"]["ingress"][:0] = [
+            {"hostname": "a.newlevel.media", "service": "hello_world"},
+            {"hostname": "b.newlevel.media", "service": "unix:/run/presenter.sock"},
+            {"hostname": "c.newlevel.media", "service": "https://localhost"},
+            {"hostname": "d.newlevel.media", "service": "tcp://localhost:5900"},
+        ]
+        cf.tunnels["tun-presenter-pp"]["config"]["warp-routing"] = {"enabled": False}
+        self.assertEqual(cfc.run(cf, apply=False, out=quiet) > 0, True)
 
     def test_an_unreadable_neighbour_service_stops_the_run(self):
         cf = FakeCloudflare()
@@ -617,8 +646,7 @@ class Main(unittest.TestCase):
         self.assertEqual(cfc.main(["x", "bogus"], cf=cf), 2)
 
     def test_hosts_lists_a_rigs_hostnames_from_the_tunnel_map_without_any_token(self):
-        os.environ["CF_TOKEN_FILE"] = "/nonexistent/companion-test-token"
-        try:
+        with mock.patch.dict(os.environ, {"CF_TOKEN_FILE": "/nonexistent/companion-test-token"}):
             cases = {
                 ("hosts", "companion-snv"): "companion-snv.newlevel.media companion.newlevel.media companion-update-snv.newlevel.media",
                 ("hosts", "companion-snv", "--ui"): "companion-snv.newlevel.media companion.newlevel.media",
@@ -632,8 +660,18 @@ class Main(unittest.TestCase):
                     with contextlib.redirect_stdout(out):
                         self.assertEqual(cfc.main(["x", *args]), 0)
                     self.assertEqual(out.getvalue(), want + "\n")
-        finally:
-            del os.environ["CF_TOKEN_FILE"]
+            for args in (("hosts",), ("hosts", "linux-pp", "--UI"), ("hosts", "a", "b", "c")):
+                with self.subTest(args=args):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        self.assertEqual(cfc.main(["x", *args]), 2, "bad arguments print the usage")
+                    self.assertIn("Usage:", err.getvalue())
+
+    def test_a_missing_token_file_is_a_clear_error(self):
+        with mock.patch.dict(os.environ, {"CF_TOKEN_FILE": "/nonexistent/companion-test-token"}):
+            with self.assertRaises(cfc.CloudflareError) as ctx:
+                cfc.main(["x", "status"])
+        self.assertIn("/nonexistent/companion-test-token", str(ctx.exception))
 
     def test_apply_that_does_not_converge_is_an_error(self):
         cf = FakeCloudflare()

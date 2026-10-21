@@ -10,8 +10,13 @@ when needed, and FAILS unless a handshake with the public Host and Origin
 answers 101. When anything fails after the edit, the old config is put back.
 
 Companion is a small TCP server here that answers like the real one (a 101 keeps
-the socket open, like a WebSocket does); `systemctl`, `cp` and Companion's node
-(running config-tool) are stubs on PATH that record their calls.
+the socket open, like a WebSocket does); `systemctl` and `cp` are stubs on PATH
+that record their calls. Companion's config-tool (node) is a fake that reads
+trustedProxies the way the real one does, as probed on companion-pp
+(Companion 5.0.7) on 2026-10-21: null / empty / ~ / "" = unset; quotes and
+comments dropped; a value on the next, indented line is the value; any YAML
+list is an error (and launch.sh would then start Companion with NO flags);
+with a duplicate key the first one wins.
 """
 import os
 import re
@@ -50,11 +55,43 @@ if [ "${n}" = "${STUB_SYSTEMCTL_FAIL_AT}" ]; then
   exit 1
 fi
 """,
-    # Records what the config says at the moment it is validated.
+    # config-tool: records what the config says when it is read, then validates or generates.
     "node": """#!/bin/bash
 set -euo pipefail
 echo "node [$(grep '^trustedProxies' "${COMPANION_CONFIG_FILE}" || true)] $*" >> "${STUB_DIR}/calls"
-exit "${STUB_VALIDATE_EXIT}"
+exec python3 "${STUB_DIR}/config_tool.py" "$@"
+""",
+    "config_tool.py": """import os, re, shlex, sys
+path, cmd = os.environ["COMPANION_CONFIG_FILE"], sys.argv[-1]
+lines = open(path).read().splitlines()
+value, error = None, None
+for i, line in enumerate(lines):
+    if re.match(r"trustedProxies\\s*:", line):
+        raw = re.sub(r"\\s+#.*$", "", line.split(":", 1)[1]).strip()
+        if not raw:
+            rest = [l for l in lines[i + 1:] if l.strip() and not l.strip().startswith("#")]
+            if rest and rest[0].lstrip().startswith("-"):
+                error = "list"
+            elif rest and rest[0][:1].isspace():
+                raw = rest[0].strip()
+        if raw[:1] in "[{" and raw:
+            error = "list"
+        raw = raw[1:-1] if len(raw) > 1 and raw[0] == raw[-1] and raw[0] in "'\\"" else raw
+        value = None if raw in ("", "null", "~") else raw
+        break
+if error:
+    print('Error: Invalid value for "trustedProxies": Expected a single value, not a list or object', file=sys.stderr)
+    sys.exit(1)
+if cmd == "validate":
+    if os.environ.get("STUB_VALIDATE_EXIT", "0") != "0":
+        print("trustedProxies: rejected", file=sys.stderr)
+        sys.exit(int(os.environ["STUB_VALIDATE_EXIT"]))
+    print(path + " is valid.")
+elif cmd == "generate":
+    if value == "loopback" and os.environ.get("STUB_READS_AS"):
+        value = os.environ["STUB_READS_AS"]
+    flags = "--admin-port 8000 --extra-module-path /opt/companion-module-dev --enable-restricted-modules"
+    print("set -- " + flags + ("" if value is None else " --trusted-proxies " + shlex.quote(value)))
 """,
     # The STUB_CP_FAIL_AT-th copy behaves like a full disk: truncated target, exit 1.
     "cp": """#!/bin/bash
@@ -93,7 +130,7 @@ class CompanionHandler(socketserver.StreamRequestHandler):
         upgrade = headers.get("upgrade", "").lower() == "websocket"
         srv = self.server
         with srv.lock:
-            answer = "200"
+            answer = srv.http_answer
             if upgrade:
                 answer = srv.ws_answers[min(srv.ws_count, len(srv.ws_answers) - 1)]
                 srv.ws_count += 1
@@ -116,8 +153,11 @@ class CompanionHandler(socketserver.StreamRequestHandler):
                     return  # a reset is how a client that read only the status line hangs up
 
 
-def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail_at=0, systemctl_fail_at=0, tries=2):
-    """config = the launch config's text (None = no file). Returns (proc, calls, config after)."""
+def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, http_answer="200", validate_exit=0, cp_fail_at=0,
+        systemctl_fail_at=0, reads_as="", tries=2, leftovers=None):
+    """config = the launch config's text (None = no file). Returns (proc, calls, config after).
+
+    leftovers: a dict that receives the temp files the script left in its TMPDIR (name -> content)."""
     tmp = tempfile.TemporaryDirectory()
     for name, body in STUBS.items():
         path = os.path.join(tmp.name, name)
@@ -132,6 +172,9 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail
             f.write(config)
     server = FakeCompanion(("127.0.0.1", 0), CompanionHandler)
     server.lock, server.calls, server.ws_answers, server.ws_count, server.ws_delay = threading.Lock(), calls_path, list(ws), 0, ws_delay
+    server.http_answer = http_answer
+    script_tmp = os.path.join(tmp.name, "script-tmp")
+    os.mkdir(script_tmp)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = dict(
         os.environ,
@@ -140,6 +183,7 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail
         STUB_VALIDATE_EXIT=str(validate_exit),
         STUB_CP_FAIL_AT=str(cp_fail_at),
         STUB_SYSTEMCTL_FAIL_AT=str(systemctl_fail_at),
+        STUB_READS_AS=reads_as,
         COMPANION_CONFIG_FILE=config_file,
         COMPANION_NODE=os.path.join(tmp.name, "node"),
         COMPANION_CONFIG_TOOL="/opt/companion/config-tool.js",
@@ -147,6 +191,7 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail
         COMPANION_PORT=str(server.server_address[1]),
         PROXY_TRIES=str(tries),
         PROXY_INTERVAL="0",
+        TMPDIR=script_tmp,
     )
     try:
         proc = subprocess.run(["bash", SCRIPT, *hosts], capture_output=True, text=True, env=env, timeout=60)
@@ -155,6 +200,10 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail
         server.server_close()
     with open(calls_path) as f:
         calls = f.read().splitlines()
+    if leftovers is not None:
+        for name in os.listdir(script_tmp):
+            with open(os.path.join(script_tmp, name)) as f:
+                leftovers[name] = f.read()
     after = None
     if os.path.exists(config_file):
         with open(config_file) as f:
@@ -173,11 +222,17 @@ def systemctl(calls):
 
 class SetsTheProxy(unittest.TestCase):
     def test_sets_loopback_validates_it_restarts_companion_and_checks_every_public_host(self):
-        proc, calls, after = run(CONFIG.format(value="null"))
+        left = {}
+        proc, calls, after = run(CONFIG.format(value="null"), leftovers=left)
+        self.assertEqual(left, {}, "the backup is removed once the new config is proven")
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(after, CONFIG.format(value="loopback"))
-        validate = [c for c in calls if c.startswith("node ")]
+        validate = [c for c in calls if c.startswith("node ") and c.endswith(" validate")]
         self.assertEqual(validate, ["node [trustedProxies: loopback] /opt/companion/config-tool.js validate"])
+        generated = [c for c in calls if c.startswith("node ") and c.endswith(" generate")]
+        self.assertEqual(generated, ["node [trustedProxies: null] /opt/companion/config-tool.js generate",
+                                     "node [trustedProxies: loopback] /opt/companion/config-tool.js generate"],
+                         "the value Companion will get is read from config-tool before and after the edit")
         self.assertEqual(systemctl(calls), ["systemctl restart companion"])
         self.assertLess(calls.index(validate[0]), calls.index("systemctl restart companion"))
         checks = handshakes(calls)
@@ -198,7 +253,7 @@ class SetsTheProxy(unittest.TestCase):
         self.assertEqual(after, config + "\ntrustedProxies: loopback\n")
 
     def test_replaces_an_empty_value_in_any_spelling(self):
-        for value in ("null", "", "~", "[]", '""'):
+        for value in ("null", "", "~", '""'):
             with self.subTest(value=value):
                 proc, _calls, after = run(CONFIG.format(value=value))
                 self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -218,25 +273,35 @@ class SetsTheProxy(unittest.TestCase):
 class LeavesItAlone(unittest.TestCase):
     def test_leaves_config_and_companion_alone_when_loopback_is_already_listed(self):
         for value in ("loopback", '"loopback"', "10.77.8.0/24, loopback", "loopback;10.77.8.0/24",
-                      "loopback  # tunnel", "[loopback]", "[10.77.8.0/24, loopback]"):
+                      "loopback  # tunnel"):
             with self.subTest(value=value):
                 config = CONFIG.format(value=value)
                 proc, calls, after = run(config)
                 self.assertEqual(proc.returncode, 0, proc.stderr)
                 self.assertEqual(after, config)
                 self.assertEqual(systemctl(calls), [])
-                self.assertFalse([c for c in calls if c.startswith("node ")])
+                self.assertFalse([c for c in calls if c.endswith(" validate")])
                 self.assertEqual(len(handshakes(calls)), len(HOSTS))
 
     def test_restarts_companion_once_when_its_running_config_is_older_than_the_file(self):
         config = CONFIG.format(value="loopback")
-        proc, calls, after = run(config, ws=("403", "101"))
+        proc, calls, after = run(config, ws=("403", "101"), tries=1)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(after, config)
         self.assertEqual(systemctl(calls), ["systemctl restart companion"])
+        self.assertEqual([c for c in calls if c.endswith(" validate")],
+                         ["node [trustedProxies: loopback] /opt/companion/config-tool.js validate"],
+                         "the file is validated before Companion is restarted on it")
+
+    def test_never_restarts_a_stale_companion_onto_a_config_that_does_not_validate(self):
+        config = CONFIG.format(value="loopback")
+        proc, calls, after = run(config, ws=("403", "101"), validate_exit=1)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, config)
+        self.assertEqual(systemctl(calls), [])
 
     def test_refuses_to_override_a_proxy_list_someone_else_set(self):
-        for value in ("10.77.8.0/24", "[10.77.8.0/24]", "10.77.8.0/24, myloopback"):
+        for value in ("10.77.8.0/24", "10.77.8.0/24, myloopback", "\n  10.77.8.0/24"):
             with self.subTest(value=value):
                 config = CONFIG.format(value=value)
                 proc, calls, after = run(config)
@@ -252,6 +317,8 @@ class LeavesItAlone(unittest.TestCase):
             "YAML list": listed.format(items="  - 10.0.0.0/8\n"),
             "YAML list at key indent": listed.format(items="- 10.0.0.0/8\n"),
             "YAML list after a comment": listed.format(items="  # lan\n\n  - 10.0.0.0/8\n"),
+            "flow list with loopback": CONFIG.format(value="[loopback]"),
+            "empty flow list": CONFIG.format(value="[]"),
         }
         for name, config in shapes.items():
             with self.subTest(shape=name):
@@ -261,9 +328,27 @@ class LeavesItAlone(unittest.TestCase):
                 self.assertEqual(systemctl(calls), [])
                 if name == "duplicate key":
                     self.assertIn("sets trustedProxies 2 times", proc.stderr)
+                else:
+                    self.assertIn("config-tool cannot read", proc.stderr)
 
 
 class Fails(unittest.TestCase):
+    def test_rolls_back_when_config_tool_reads_the_edit_as_something_else(self):
+        config = CONFIG.format(value="null")
+        proc, calls, after = run(config, reads_as="loopback 10.77.8.0/24")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, config)
+        self.assertEqual(systemctl(calls), [])
+        self.assertIn("loopback 10.77.8.0/24", proc.stderr)
+
+    def test_never_restarts_into_a_config_config_tool_cannot_read(self):
+        # launch.sh ignores a failing generate and starts Companion with no flags at all.
+        config = CONFIG.format(value="loopback") + "badKey: [\n"
+        proc, calls, after = run(config.replace("trustedProxies: loopback", "trustedProxies: [loopback]"), ws=("403",))
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(systemctl(calls), [])
+        self.assertEqual(handshakes(calls), [])
+
     def test_fails_without_waiting_when_companion_still_refuses_after_one_restart(self):
         # A 403 from a freshly restarted Companion is its answer, not a start-up state.
         proc, calls, after = run(CONFIG.format(value="loopback"), ws=("403",), tries=5)
@@ -304,6 +389,16 @@ class Fails(unittest.TestCase):
         )
         self.assertIn("not answering", proc.stderr)
         self.assertIn("restored", proc.stderr)
+        self.assertNotIn("did not come back", proc.stderr)
+
+    def test_says_so_when_companion_does_not_come_back_after_the_restore(self):
+        left = {}
+        config = CONFIG.format(value="null")
+        proc, _calls, after = run(config, ws=("close",), http_answer="503", leftovers=left)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, config)
+        self.assertIn("did not come back", proc.stderr)
+        self.assertEqual(left, {}, "the backup is removed once it is restored")
 
     def test_a_failed_backup_never_touches_the_live_config(self):
         config = CONFIG.format(value="null")
@@ -316,15 +411,13 @@ class Fails(unittest.TestCase):
         self.assertNotIn("backup kept", proc.stderr)
 
     def test_a_failed_restore_keeps_the_backup_and_never_truncates_the_config(self):
-        original = CONFIG.format(value="null")
-        proc, calls, after = run(original, ws=("close",), cp_fail_at=2, tries=2)
+        original, left = CONFIG.format(value="null"), {}
+        proc, calls, after = run(original, ws=("close",), cp_fail_at=2, tries=2, leftovers=left)
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(after, CONFIG.format(value="loopback"), "the live config must stay whole")
         found = re.search(r"backup kept at (\S+)", proc.stderr)
         self.assertIsNotNone(found, proc.stderr)
-        with open(found.group(1)) as f:
-            self.assertEqual(f.read(), original)
-        os.remove(found.group(1))
+        self.assertEqual(left, {os.path.basename(found.group(1)): original})
         self.assertNotIn("restored to its previous content", proc.stderr)
 
     def test_restores_the_config_and_keeps_companion_running_when_validation_fails(self):
