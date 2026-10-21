@@ -113,7 +113,12 @@ Repository:
 | https://companion-pp.newlevel.media | companion-pp | Companion UI (:8000) |
 | https://companion-update-pp.newlevel.media | companion-pp | Update dashboard (:8081) |
 
-Every URL is behind Cloudflare Access: one-time PIN to the owner's e-mail, with a 30-day session like the other newlevel apps. cloudflared on the rig rejects any request without a valid Access token as well.
+Every URL is behind Cloudflare Access with a one-time PIN by e-mail:
+
+- **companion-snv, companion-update-snv, companion-update-pp:** Access apps managed by `host/cloudflare_companion.py`. Only the owner's e-mail is allowed, with a 30-day session like the other newlevel apps.
+- **companion-pp and the old `companion.newlevel.media`:** the owner's own Access app "newlevel". Its policy "basic" allows the owner and the two people he chose. The tool only checks this app; it never changes it.
+
+cloudflared on the rig also rejects any request without a valid Access token for that hostname's app.
 
 **Never run `cloudflared service install <token>` for companion.** It rewrites `cloudflared.service`, which on these rigs belongs to the presenter project's tunnel. That command is how the companion tunnels went down unnoticed before. Companion runs its own unit, `cloudflared-companion.service`.
 

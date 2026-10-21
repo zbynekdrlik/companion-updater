@@ -347,11 +347,16 @@ PAGE = 100
 
 
 def list_all(cf, path):
-    """Every item of a paged list endpoint."""
+    """Every item of a paged list endpoint (`path` without a query string).
+
+    A page shorter than PAGE is the last one; that is only safe because we ask
+    for exactly PAGE items per page (Cloudflare allows up to 1000).
+    """
+    if "?" in path:
+        raise CloudflareError(f"list_all takes a path without a query string, got {path}")
     items = []
-    sep = "&" if "?" in path else "?"
     for page in range(1, 1000):
-        batch = cf.call("GET", f"{path}{sep}page={page}&per_page={PAGE}") or []
+        batch = cf.call("GET", f"{path}?page={page}&per_page={PAGE}") or []
         items.extend(batch)
         if len(batch) < PAGE:
             return items

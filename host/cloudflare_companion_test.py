@@ -60,6 +60,12 @@ class FakeCloudflare:
         self.alerts = [{"id": "n1", "name": "Default budget alert (auto-created)", "alert_type": "billing_budget_alert", "enabled": True}]
         self.no_aud = False
 
+    @staticmethod
+    def page_of(items, params):
+        """Cloudflare-style paging: page N of size per_page (both required)."""
+        page, per_page = int(params["page"]), int(params["per_page"])
+        return copy.deepcopy(items[(page - 1) * per_page:page * per_page])
+
     def writes(self):
         return [(m, p) for m, p, _b in self.calls if m != "GET"]
 
@@ -88,7 +94,7 @@ class FakeCloudflare:
                 new = dict(body, id=f"pol{len(self.policies) + 1}")
                 self.policies.append(new)
                 return new
-            return copy.deepcopy(self.policies) if params.get("page") == "1" else []
+            return self.page_of(self.policies, params)
         if base.startswith("/accounts/acc1/access/policies/") and method == "PUT":
             pid = base.rsplit("/", 1)[1]
             for i, p in enumerate(self.policies):
@@ -102,7 +108,7 @@ class FakeCloudflare:
                 new = dict(body, id=f"a{len(self.apps) + 1}", aud=None if self.no_aud else f"aud-{body['domain']}")
                 self.apps.append(new)
                 return copy.deepcopy(new)
-            return copy.deepcopy(self.apps) if params.get("page") == "1" else []
+            return self.page_of(self.apps, params)
         if base.startswith("/accounts/acc1/access/apps/") and method == "PUT":
             aid = base.rsplit("/", 1)[1]
             for i, a in enumerate(self.apps):
@@ -167,19 +173,24 @@ class PureFunctions(unittest.TestCase):
             self.assertTrue(cfc.covers(app, d), d)
         self.assertFalse(cfc.covers(app, "d.example"))
 
-    def test_list_all_follows_pages(self):
+    def test_list_all_follows_pages_with_an_explicit_page_size(self):
         class Paged:
             def __init__(self):
                 self.pages = []
 
             def call(self, method, path, body=None):
-                page = int(path.split("page=")[1].split("&")[0])
-                self.pages.append(page)
-                return list(range(cfc.PAGE)) if page < 3 else [1]
+                base, query = path.split("?")
+                params = dict(kv.split("=") for kv in query.split("&"))
+                assert path.count("?") == 1 and base == "/x"
+                assert params["per_page"] == str(cfc.PAGE), "the stop rule needs an explicit page size"
+                self.pages.append(int(params["page"]))
+                return list(range(cfc.PAGE)) if int(params["page"]) < 3 else [1]
 
         cf = Paged()
-        self.assertEqual(len(cfc.list_all(cf, "/x?y=1")), 2 * cfc.PAGE + 1)
+        self.assertEqual(len(cfc.list_all(cf, "/x")), 2 * cfc.PAGE + 1)
         self.assertEqual(cf.pages, [1, 2, 3])
+        with self.assertRaises(cfc.CloudflareError):
+            cfc.list_all(cf, "/x?y=1")
 
     def test_app_plan(self):
         payload = cfc.app_payload("d.example", "D · claude", "idp", "pol")
@@ -264,6 +275,20 @@ class RunAgainstTheFoundState(unittest.TestCase):
         # policy, 3 apps, alert, both tunnels' ingress, 3 new DNS records
         self.assertEqual(changes, 10)
         self.assertEqual(cf.writes(), [])
+
+    def test_apps_and_policies_on_later_pages_are_found(self):
+        saved = cfc.PAGE
+        cfc.PAGE = 1  # every app and policy on its own page; the owner's app is not on page 1
+        try:
+            cf = FakeCloudflare()
+            cf.apps.insert(0, {"id": "a0", "aud": "x", "name": "other", "domain": "other.example", "policies": []})
+            cf.policies.insert(0, {"id": "p0", "name": "other", "decision": "allow", "include": []})
+            apply_and_converge(self, cf)
+            self.assertFalse([a for a in cf.apps if a["domain"] == "companion-pp.newlevel.media"],
+                             "the owner's app on page 2 must be seen as covering companion-pp")
+            self.assertEqual(len([p for p in cf.policies if p["name"] == cfc.POLICY_NAME]), 1)
+        finally:
+            cfc.PAGE = saved
 
     def test_apply_writes_access_before_any_routing_and_converges(self):
         cf = FakeCloudflare()
