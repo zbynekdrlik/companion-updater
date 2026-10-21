@@ -25,3 +25,4 @@ flate2 = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+tower = { version = "0.5", features = ["util"] }
