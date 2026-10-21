@@ -127,24 +127,27 @@ remote_copy "${SCRIPT_DIR}/host/cloudflared-companion.yml" "${COMPANION_USER}@${
 remote "sudo install -m 0644 /tmp/cloudflared-companion.yml /etc/cloudflared-companion.yml && rm /tmp/cloudflared-companion.yml"
 remote "sudo systemctl daemon-reload"
 RIG="$(remote hostname)"
-# Every hostname the rig's tunnel serves (keep in sync with TUNNELS in
-# host/cloudflare_companion.py); each must answer with the Access login.
+# Every hostname the rig's tunnel serves, from the one tunnel map in
+# host/cloudflare_companion.py; each must answer with the Access login.
 # UI_HOSTS are the ones serving the Companion UI itself.
-case "${RIG}" in
-  companion-snv)
-    PUBLIC_HOSTS="companion-snv.newlevel.media companion-update-snv.newlevel.media companion.newlevel.media"
-    UI_HOSTS="companion-snv.newlevel.media companion.newlevel.media" ;;
-  linux-pp)
-    PUBLIC_HOSTS="companion-pp.newlevel.media companion-update-pp.newlevel.media"
-    UI_HOSTS="companion-pp.newlevel.media" ;;
-  *) PUBLIC_HOSTS=""; UI_HOSTS="" ;;
-esac
+PUBLIC_HOSTS="$(python3 "${SCRIPT_DIR}/host/cloudflare_companion.py" hosts "${RIG}")"
+UI_HOSTS="$(python3 "${SCRIPT_DIR}/host/cloudflare_companion.py" hosts "${RIG}" --ui)"
 remote_copy "${SCRIPT_DIR}/host/ensure-companion-proxy.sh" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/ensure-companion-proxy.sh"
 remote "sudo install -m 0755 /tmp/ensure-companion-proxy.sh /usr/local/sbin/ensure-companion-proxy.sh && rm /tmp/ensure-companion-proxy.sh"
+# Companion must accept the UI's WebSocket from cloudflared, or the page loads
+# and never connects: ensure-companion-proxy.sh sets trustedProxies: loopback
+# (restarting Companion only when needed) and proves the handshake.
+ensure_companion_proxy() {
+  if ! remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"; then
+    echo "ERROR: Companion on ${RIG} does not accept the web UI connection from the tunnel (see above)."
+    exit 1
+  fi
+}
+TUNNEL_ON=no
 if [ "${COMPANION_TUNNEL:-}" = "skip" ]; then
   echo "  COMPANION_TUNNEL=skip: unit installed, not started."
 elif [ -z "${PUBLIC_HOSTS}" ]; then
-  echo "ERROR: ${COMPANION_HOST} is '${RIG}', which has no web hostname (add it to deploy.sh and host/cloudflare_companion.py, or set COMPANION_TUNNEL=skip)"
+  echo "ERROR: ${COMPANION_HOST} is '${RIG}', which has no web hostname (add it to TUNNELS / RIG_TUNNEL in host/cloudflare_companion.py, or set COMPANION_TUNNEL=skip)"
   exit 1
 elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
   echo "ERROR: no tunnel token on ${RIG}. Run on dev1:"
@@ -152,13 +155,14 @@ elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
   echo "  (or deploy without web access: COMPANION_TUNNEL=skip)"
   exit 1
 else
-  # Companion must accept the UI's WebSocket from the tunnel, or the page loads
-  # and never connects (restarts Companion only when it changes the setting).
-  if ! remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"; then
-    echo "ERROR: Companion on ${RIG} would not accept the web UI connection from the tunnel (see above)."
-    echo "  A rig without /etc/companion/config.yaml needs the Companion upgrade first: COMPANION_TUNNEL=skip ./deploy.sh, then deploy again."
-    exit 1
+  # Before the tunnel serves the UI. A Companion older than 5.0 has no launch
+  # config yet; step 8's upgrade creates it and step 9 sets it then.
+  if remote "test -f /etc/companion/config.yaml"; then
+    ensure_companion_proxy
+  else
+    echo "  Companion has no launch config yet (older than 5.0); step 9 sets it after the upgrade."
   fi
+  TUNNEL_ON=yes
   remote "sudo systemctl enable cloudflared-companion" >/dev/null
   if ! remote "sudo systemctl restart cloudflared-companion"; then
     echo "ERROR: cloudflared-companion did not start on ${RIG} (sudo journalctl -u cloudflared-companion -n 50)"
@@ -250,10 +254,13 @@ if ! curl -sf --max-time 5 "http://${COMPANION_HOST}:8081/healthz" >/dev/null 2>
   exit 1
 fi
 
-# The step-8 upgrade must not have broken the web UI behind a running tunnel.
-if [ "${COMPANION_UPGRADE:-}" != "skip" ] && [ -n "${UI_HOSTS}" ] \
-   && remote "systemctl is-active --quiet cloudflared-companion"; then
-  remote "sudo /usr/local/sbin/ensure-companion-proxy.sh ${UI_HOSTS}"
+# Again after the step-8 upgrade (it may have created the launch config, or
+# changed Companion): whenever this deploy started the tunnel, or a tunnel left
+# running by an earlier deploy serves this rig (COMPANION_TUNNEL=skip).
+if [ "${TUNNEL_ON}" = yes ]; then
+  ensure_companion_proxy
+elif [ -n "${UI_HOSTS}" ] && [ "$(remote "systemctl is-active cloudflared-companion" || true)" = active ]; then
+  ensure_companion_proxy
 fi
 
 HOST_IP=$(remote "hostname -I | awk '{print \$1}'" 2>/dev/null || echo "${COMPANION_HOST}")

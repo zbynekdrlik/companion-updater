@@ -26,6 +26,9 @@ Usage:
   cloudflare_companion.py plan       # what would change; exit 0 = nothing, 3 = changes pending
   cloudflare_companion.py apply      # make the changes, then re-plan (must be clean)
   cloudflare_companion.py status     # tunnel health; exit 1 when a tunnel is not healthy
+  cloudflare_companion.py hosts <rig hostname> [--ui]
+      # the rig's public hostnames (--ui: only the Companion UI ones), from TUNNELS;
+      # no token needed. deploy.sh reads them from here.
   cloudflare_companion.py install-token <ssh-host>
       # write the run token of THAT rig's tunnel (chosen by the rig's hostname) to
       # /etc/cloudflared-companion.env (root 0600) and restart cloudflared-companion.
@@ -88,6 +91,10 @@ ALERT_NAME = "Companion tunnels health · claude"
 # updater would publish them under that project's Access. Checked, never changed.
 RIG_NEIGHBOUR_TUNNELS = ["presenter-prod", "presenter-pp"]
 RIG_PORTS = (8000, 8081)
+# Neighbour services that cannot reach a TCP port: an allowlist, so a new or
+# unknown cloudflared service (bastion, socks-proxy, ...) stops the run.
+PORTLESS_SERVICES = {"hello_world", "hello-world"}
+PORTLESS_PREFIXES = ("http_status:", "unix:", "unix+tls:")
 ENV_FILE = "/etc/cloudflared-companion.env"
 UNIT = "cloudflared-companion"
 
@@ -294,18 +301,50 @@ def alert_plan(policies, payload):
     return ("update", pol.get("id"), f"notification '{payload['name']}': " + "; ".join(diffs))
 
 
+def any_port(origin):
+    return bool(origin.get("bastionMode")) or origin.get("proxyType") == "socks"
+
+
 def neighbour_problem(name, config):
-    """A rule in another tunnel on the rigs that reaches Companion's or the updater's port."""
-    for rule in (config or {}).get("ingress") or []:
+    """A rule in another tunnel on the rigs that reaches, or could reach, Companion's or the updater's port."""
+    config = config or {}
+    where = f"tunnel {name} (not ours; it runs on a Companion rig)"
+    trust = "Companion trusts local proxies, so fix that tunnel first"
+    if (config.get("warp-routing") or {}).get("enabled"):
+        return f"{where} has WARP routing on, which reaches the rig's ports directly; {trust}"
+    tunnel_wide = config.get("originRequest") or {}
+    for rule in config.get("ingress") or []:
         service = rule.get("service") or ""
+        host = rule.get("hostname") or "*"
+        # cloudflared applies the tunnel-wide originRequest to every rule.
+        if service in ("bastion", "socks-proxy") or any_port({**tunnel_wide, **(rule.get("originRequest") or {})}):
+            return f"{where} can reach any port on the rig through {host} ({service}), Companion's and the updater's included; {trust}"
+        if service in PORTLESS_SERVICES or service.startswith(PORTLESS_PREFIXES):
+            continue
+        if "://" not in service:
+            return f"{where} routes {host} to {service!r}, a service this check does not know; it may reach any port. {trust}"
         try:
-            port = urllib.parse.urlsplit(service).port if "://" in service else None
-        except ValueError:
-            port = None
+            port = urllib.parse.urlsplit(service).port
+        except ValueError as err:
+            return f"{where}: cannot read its service {service!r} ({err}), so this check cannot vouch for it"
         if port in RIG_PORTS:
-            return (f"tunnel {name} (not ours; it runs on a Companion rig) routes {rule.get('hostname') or '*'} to {service}. "
+            return (f"{where} routes {rule.get('hostname') or '*'} to {service}. "
                     "Companion trusts local proxies, so that publishes it under another Access app; fix that tunnel first")
     return None
+
+
+def neighbour_configs(cf, acc):
+    """The rig-neighbour tunnels' ingress. A missing or rig-managed one is an error: unchecked is not safe."""
+    out = {}
+    for name in RIG_NEIGHBOUR_TUNNELS:
+        found = cf.call("GET", f"/accounts/{acc}/cfd_tunnel?name={q(name)}&is_deleted=false")
+        if not found:
+            raise CloudflareError(f"neighbour tunnel {name} not found; if the presenter project renamed it, update RIG_NEIGHBOUR_TUNNELS")
+        if not found[0].get("remote_config"):
+            raise CloudflareError(f"neighbour tunnel {name} is managed on the rig, so its ingress cannot be checked from here")
+        conf = cf.call("GET", f"/accounts/{acc}/cfd_tunnel/{found[0]['id']}/configurations")
+        out[name] = (conf or {}).get("config") or {}
+    return out
 
 
 def tunnel_id_from_token(token):
@@ -352,8 +391,11 @@ class Cloudflare:
 
 def read_token():
     path = os.environ.get("CF_TOKEN_FILE", os.path.expanduser("~/.secrets/cloudflare-newlevel-full"))
-    with open(path) as f:
-        token = "".join(f.read().split())
+    try:
+        with open(path) as f:
+            token = "".join(f.read().split())
+    except OSError as err:
+        raise CloudflareError(f"cannot read the API token file {path}: {err.strerror}") from err
     if not token:
         raise CloudflareError(f"{path} is empty")
     return token
@@ -399,12 +441,6 @@ def gather(cf):
             raise CloudflareError(f"tunnel {name} is not remotely managed; its ingress lives on the rig")
         conf = cf.call("GET", f"/accounts/{acc}/cfd_tunnel/{t['id']}/configurations")
         st["tunnels"][name] = {"id": t["id"], "status": t.get("status"), "connections": len(t.get("connections") or []), "config": (conf or {}).get("config") or {}}
-    st["neighbours"] = {}
-    for name in RIG_NEIGHBOUR_TUNNELS:
-        found = cf.call("GET", f"/accounts/{acc}/cfd_tunnel?name={q(name)}&is_deleted=false")
-        if found:
-            conf = cf.call("GET", f"/accounts/{acc}/cfd_tunnel/{found[0]['id']}/configurations")
-            st["neighbours"][name] = (conf or {}).get("config") or {}
     idps = [i for i in cf.call("GET", f"/accounts/{acc}/access/identity_providers") if i.get("type") == "onetimepin"]
     if not idps:
         raise CloudflareError("no one-time-PIN identity provider in the account")
@@ -434,7 +470,7 @@ def run(cf, apply, out=print):
         problem = alias_check(st["apps"][alias], alias)
         if problem:
             raise CloudflareError(problem)
-    for name, config in st["neighbours"].items():
+    for name, config in neighbour_configs(cf, acc).items():
         problem = neighbour_problem(name, config)
         if problem:
             raise CloudflareError(problem)
@@ -581,6 +617,13 @@ def install_token(cf, ssh_host, runner=subprocess.run):
 
 def main(argv, cf=None, runner=subprocess.run):
     cmd = argv[1] if len(argv) > 1 else "plan"
+    if cmd == "hosts":
+        if len(argv) not in (3, 4) or argv[3:] not in ([], ["--ui"]):
+            print(__doc__, file=sys.stderr)
+            return 2
+        rules = TUNNELS.get(RIG_TUNNEL.get(argv[2], ""), [])
+        print(" ".join(host for host, service in rules if not argv[3:] or service == COMPANION_UI))
+        return 0
     cf = cf or Cloudflare(read_token())
     if cmd == "plan":
         changes = run(cf, apply=False)

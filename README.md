@@ -70,12 +70,12 @@ The deploy script (`[1/9]`…`[9/9]` in its output):
 4. Installs the backup pusher (script + systemd timer)
 5. Builds the `companion-updater` Rust binary locally
 6. Installs it as a systemd service
-7. Sets Companion's `trustedProxies: loopback` (restarting Companion only when that changes) and installs and starts the web access tunnel (`cloudflared-companion.service`), after the updater so the public dashboard is never served without its cross-site guard. It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when Companion refuses the web UI connection from the tunnel, when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
+7. Installs and starts the web access tunnel (`cloudflared-companion.service`), after the updater so the public dashboard is never served without its cross-site guard. The rig's hostnames come from `host/cloudflare_companion.py hosts`. Before starting it, it sets Companion's `trustedProxies: loopback` (restarting Companion only when needed) when Companion already has its launch config. It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when Companion refuses the web UI connection from the tunnel, when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
 8. Triggers the Companion upgrade through that freshly deployed updater
    (binary first, upgrade second — otherwise a fix to the upgrade path could
    never take effect in the deploy that ships it). `COMPANION_UPGRADE=skip`
    deploys the tooling only and leaves Companion at its version
-9. Waits for health checks to pass; after a Companion upgrade, with the tunnel running, it checks again that Companion accepts the web UI connection from the tunnel
+9. Waits for health checks to pass, then checks again, after the upgrade, that Companion accepts the web UI connection from the tunnel (whenever this deploy started the tunnel or one is running)
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
 
