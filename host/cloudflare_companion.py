@@ -47,8 +47,10 @@ ACCESS_HOSTS = {
 }
 OWNER_EMAILS = ["drlik.zbynek@gmail.com"]
 POLICY_NAME = "Companion owner (OTP email) · claude"
-# Like the owner's other apps (sp, prsnv, streamsnv): a device logs in about once a month.
-SESSION_DURATION = "730h"
+# Owner 2026-10-21: "raz prihlásim zariadenie" -- a device logged in once keeps the
+# Companion UI for 120 days. The first login on a device is usually free anyway: the
+# Access organisation's shared login (730h) from any other newlevel app covers it.
+SESSION_DURATION = "2880h"
 DNS_COMMENT = "companion-updater#26 · claude"
 ALERT_NAME = "Companion tunnels down · claude"
 ALERT_STATUSES = ["TUNNEL_STATUS_TYPE_DOWN"]
