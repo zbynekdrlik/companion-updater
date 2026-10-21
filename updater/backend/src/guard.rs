@@ -12,8 +12,23 @@ use axum::http::{HeaderMap, StatusCode};
 
 /// `Err` (403) for a request a browser made on behalf of another site.
 pub fn reject_cross_site(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
-    let _ = headers;
-    Ok(())
+    let site = headers
+        .get("sec-fetch-site")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_ascii_lowercase());
+    match site.as_deref() {
+        Some(s @ ("cross-site" | "same-site")) => {
+            tracing::warn!(
+                sec_fetch_site = s,
+                "refused an upgrade request made from another site"
+            );
+            Err((
+                StatusCode::FORBIDDEN,
+                "Updates can only be started from the dashboard itself.".into(),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
@@ -35,7 +50,10 @@ mod tests {
 
     #[test]
     fn a_sibling_newlevel_media_page_cannot_either() {
-        assert_eq!(reject_cross_site(&with_site("same-site")).unwrap_err().0, StatusCode::FORBIDDEN);
+        assert_eq!(
+            reject_cross_site(&with_site("same-site")).unwrap_err().0,
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[test]
