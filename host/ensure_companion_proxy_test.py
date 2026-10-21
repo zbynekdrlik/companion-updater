@@ -39,9 +39,16 @@ notifications: true
 """
 
 STUBS = {
+    # The STUB_SYSTEMCTL_FAIL_AT-th call fails, like a unit that does not start.
     "systemctl": """#!/bin/bash
 set -euo pipefail
+n=$(( $(cat "${STUB_DIR}/systemctl_count" 2>/dev/null || echo 0) + 1 ))
+echo "${n}" > "${STUB_DIR}/systemctl_count"
 echo "systemctl $*" >> "${STUB_DIR}/calls"
+if [ "${n}" = "${STUB_SYSTEMCTL_FAIL_AT}" ]; then
+  echo "Job for companion.service failed." >&2
+  exit 1
+fi
 """,
     # Records what the config says at the moment it is validated.
     "node": """#!/bin/bash
@@ -109,7 +116,7 @@ class CompanionHandler(socketserver.StreamRequestHandler):
                     return  # a reset is how a client that read only the status line hangs up
 
 
-def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail_at=0, tries=2):
+def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail_at=0, systemctl_fail_at=0, tries=2):
     """config = the launch config's text (None = no file). Returns (proc, calls, config after)."""
     tmp = tempfile.TemporaryDirectory()
     for name, body in STUBS.items():
@@ -132,6 +139,7 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail
         STUB_DIR=tmp.name,
         STUB_VALIDATE_EXIT=str(validate_exit),
         STUB_CP_FAIL_AT=str(cp_fail_at),
+        STUB_SYSTEMCTL_FAIL_AT=str(systemctl_fail_at),
         COMPANION_CONFIG_FILE=config_file,
         COMPANION_NODE=os.path.join(tmp.name, "node"),
         COMPANION_CONFIG_TOOL="/opt/companion/config-tool.js",
@@ -228,7 +236,7 @@ class LeavesItAlone(unittest.TestCase):
         self.assertEqual(systemctl(calls), ["systemctl restart companion"])
 
     def test_refuses_to_override_a_proxy_list_someone_else_set(self):
-        for value in ("10.77.8.0/24", "[10.77.8.0/24]"):
+        for value in ("10.77.8.0/24", "[10.77.8.0/24]", "10.77.8.0/24, myloopback"):
             with self.subTest(value=value):
                 config = CONFIG.format(value=value)
                 proc, calls, after = run(config)
@@ -240,7 +248,7 @@ class LeavesItAlone(unittest.TestCase):
     def test_refuses_shapes_it_cannot_edit_safely(self):
         listed = CONFIG.format(value="").replace("trustedProxies: \n", "trustedProxies:\n{items}")
         shapes = {
-            "duplicate key": CONFIG.format(value="null") + "trustedProxies: 10.0.0.0/8\n",
+            "duplicate key": CONFIG.format(value="loopback") + "trustedProxies: 10.0.0.0/8\n",
             "YAML list": listed.format(items="  - 10.0.0.0/8\n"),
             "YAML list at key indent": listed.format(items="- 10.0.0.0/8\n"),
             "YAML list after a comment": listed.format(items="  # lan\n\n  - 10.0.0.0/8\n"),
@@ -251,17 +259,36 @@ class LeavesItAlone(unittest.TestCase):
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertEqual(after, config)
                 self.assertEqual(systemctl(calls), [])
+                if name == "duplicate key":
+                    self.assertIn("sets trustedProxies 2 times", proc.stderr)
 
 
 class Fails(unittest.TestCase):
-    def test_fails_when_companion_keeps_refusing_after_one_restart(self):
-        proc, calls, after = run(CONFIG.format(value="loopback"), ws=("403",), tries=3)
+    def test_fails_without_waiting_when_companion_still_refuses_after_one_restart(self):
+        # A 403 from a freshly restarted Companion is its answer, not a start-up state.
+        proc, calls, after = run(CONFIG.format(value="loopback"), ws=("403",), tries=5)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("403", proc.stderr)
         self.assertIn(HOSTS[0], proc.stderr)
         self.assertEqual(systemctl(calls), ["systemctl restart companion"])
-        self.assertEqual(len(handshakes(calls)), 4)
+        self.assertEqual(len(handshakes(calls)), 2)
         self.assertEqual(after, CONFIG.format(value="loopback"))
+
+    def test_rolls_back_at_once_when_companion_refuses_after_the_edit(self):
+        config = CONFIG.format(value="null")
+        proc, calls, after = run(config, ws=("403",), tries=5)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, config)
+        self.assertEqual(len(handshakes(calls)), 1)
+        self.assertEqual(systemctl(calls), ["systemctl restart companion", "systemctl restart companion"])
+
+    def test_a_failed_restart_after_the_edit_still_restores_and_restarts_on_the_old_config(self):
+        config = CONFIG.format(value="null")
+        proc, calls, after = run(config, systemctl_fail_at=1)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, config)
+        self.assertEqual(systemctl(calls), ["systemctl restart companion", "systemctl restart companion"])
+        self.assertIn("restored", proc.stderr)
 
     def test_restores_the_config_and_restarts_companion_on_it_when_the_check_fails_after_the_edit(self):
         config = CONFIG.format(value="null")
