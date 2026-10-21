@@ -54,6 +54,9 @@ if [ "${n}" = "${STUB_SYSTEMCTL_FAIL_AT}" ]; then
   echo "Job for companion.service failed." >&2
   exit 1
 fi
+if [ "${n}" = "${STUB_SYSTEMCTL_TERM_PARENT_AT}" ]; then
+  kill -TERM "${PPID}"
+fi
 """,
     # config-tool: records what the config says when it is read, then validates or generates.
     "node": """#!/bin/bash
@@ -141,9 +144,11 @@ class CompanionHandler(socketserver.StreamRequestHandler):
             return
         if upgrade:
             threading.Event().wait(srv.ws_delay)
-        self.wfile.write(f"HTTP/1.1 {answer} Scripted\r\nContent-Length: 0\r\n\r\n".encode())
+        # "101-bare": a status line without a reason phrase, which HTTP allows.
+        status = "HTTP/1.1 101" if answer == "101-bare" else f"HTTP/1.1 {answer} Scripted"
+        self.wfile.write(f"{status}\r\nContent-Length: 0\r\n\r\n".encode())
         self.wfile.flush()
-        if answer == "101":
+        if answer.startswith("101"):
             # A WebSocket stays open until the client hangs up (recv gives b"").
             readable, _, _ = select.select([self.request], [], [], 10)
             if readable:
@@ -154,10 +159,12 @@ class CompanionHandler(socketserver.StreamRequestHandler):
 
 
 def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, http_answer="200", validate_exit=0, cp_fail_at=0,
-        systemctl_fail_at=0, reads_as="", tries=2, leftovers=None):
+        systemctl_fail_at=0, systemctl_term_parent_at=0, reads_as="", tries=2, leftovers=None, stdout_lines=None):
     """config = the launch config's text (None = no file). Returns (proc, calls, config after).
 
-    leftovers: a dict that receives the temp files the script left in its TMPDIR (name -> content)."""
+    leftovers: a dict that receives the temp files the script left behind (in its TMPDIR, and
+    config.yaml.restore next to the config), name -> content.
+    stdout_lines: read that many lines of the script's stdout, then close it (a dead ssh session)."""
     tmp = tempfile.TemporaryDirectory()
     for name, body in STUBS.items():
         path = os.path.join(tmp.name, name)
@@ -183,6 +190,7 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, http_answer="200", valid
         STUB_VALIDATE_EXIT=str(validate_exit),
         STUB_CP_FAIL_AT=str(cp_fail_at),
         STUB_SYSTEMCTL_FAIL_AT=str(systemctl_fail_at),
+        STUB_SYSTEMCTL_TERM_PARENT_AT=str(systemctl_term_parent_at),
         STUB_READS_AS=reads_as,
         COMPANION_CONFIG_FILE=config_file,
         COMPANION_NODE=os.path.join(tmp.name, "node"),
@@ -194,16 +202,25 @@ def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, http_answer="200", valid
         TMPDIR=script_tmp,
     )
     try:
-        proc = subprocess.run(["bash", SCRIPT, *hosts], capture_output=True, text=True, env=env, timeout=60)
+        if stdout_lines is None:
+            proc = subprocess.run(["bash", SCRIPT, *hosts], capture_output=True, text=True, env=env, timeout=60)
+        else:
+            child = subprocess.Popen(["bash", SCRIPT, *hosts], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            out = "".join(child.stdout.readline() for _ in range(stdout_lines))
+            child.stdout.close()
+            err = child.stderr.read()
+            child.wait(timeout=60)
+            proc = subprocess.CompletedProcess(child.args, child.returncode, out, err)
     finally:
         server.shutdown()
         server.server_close()
     with open(calls_path) as f:
         calls = f.read().splitlines()
     if leftovers is not None:
-        for name in os.listdir(script_tmp):
-            with open(os.path.join(script_tmp, name)) as f:
-                leftovers[name] = f.read()
+        for path in [os.path.join(script_tmp, n) for n in os.listdir(script_tmp)] + [config_file + ".restore"]:
+            if os.path.exists(path):
+                with open(path) as f:
+                    leftovers[os.path.basename(path)] = f.read()
     after = None
     if os.path.exists(config_file):
         with open(config_file) as f:
@@ -225,6 +242,7 @@ class SetsTheProxy(unittest.TestCase):
         left = {}
         proc, calls, after = run(CONFIG.format(value="null"), leftovers=left)
         self.assertEqual(left, {}, "the backup is removed once the new config is proven")
+        self.assertNotIn("could not restore", proc.stderr)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(after, CONFIG.format(value="loopback"))
         validate = [c for c in calls if c.startswith("node ") and c.endswith(" validate")]
@@ -263,6 +281,11 @@ class SetsTheProxy(unittest.TestCase):
         proc, _calls, after = run(CONFIG.format(value="null").replace("trustedProxies: null", "trustedProxies : null"))
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(after, CONFIG.format(value="loopback"))
+
+    def test_reads_a_status_line_without_a_reason_phrase(self):
+        proc, calls, _ = run(CONFIG.format(value="loopback"), ws=("101-bare",), tries=1)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(systemctl(calls), [])
 
     def test_waits_for_a_slow_handshake_instead_of_calling_it_dead(self):
         proc, calls, _ = run(CONFIG.format(value="loopback"), ws_delay=2.5, tries=1)
@@ -391,6 +414,33 @@ class Fails(unittest.TestCase):
         self.assertIn("restored", proc.stderr)
         self.assertNotIn("did not come back", proc.stderr)
 
+    def test_a_redirect_counts_as_companion_being_back(self):
+        proc, _calls, after = run(CONFIG.format(value="null"), ws=("close",), http_answer="302")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, CONFIG.format(value="null"))
+        self.assertIn("restored", proc.stderr)
+        self.assertNotIn("did not come back", proc.stderr)
+
+    def test_a_signal_during_the_restore_does_not_cut_it_short(self):
+        # The second restart is the restore's; the deploy is killed right then.
+        config = CONFIG.format(value="null")
+        proc, calls, after = run(config, ws=("close",), systemctl_term_parent_at=2)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(after, config)
+        second_restart = len(calls) - 1 - calls[::-1].index("systemctl restart companion")
+        self.assertTrue(any(c.startswith("http GET / ") for c in calls[second_restart:]), "the restore still waits for Companion")
+        self.assertIn("restored to its previous content", proc.stderr)
+
+    def test_a_dead_session_on_the_final_report_keeps_the_proven_config(self):
+        left = {}
+        # stdout: config-tool's "is valid.", "restarting Companion...", then the report.
+        proc, calls, after = run(CONFIG.format(value="null"), stdout_lines=2, leftovers=left)
+        self.assertEqual(proc.returncode, 141, proc.stderr)
+        self.assertEqual(after, CONFIG.format(value="loopback"))
+        self.assertEqual(systemctl(calls), ["systemctl restart companion"])
+        self.assertNotIn("restored", proc.stderr)
+        self.assertEqual(left, {})
+
     def test_says_so_when_companion_does_not_come_back_after_the_restore(self):
         left = {}
         config = CONFIG.format(value="null")
@@ -401,8 +451,9 @@ class Fails(unittest.TestCase):
         self.assertEqual(left, {}, "the backup is removed once it is restored")
 
     def test_a_failed_backup_never_touches_the_live_config(self):
-        config = CONFIG.format(value="null")
-        proc, calls, after = run(config, cp_fail_at=1)
+        config, left = CONFIG.format(value="null"), {}
+        proc, calls, after = run(config, cp_fail_at=1, leftovers=left)
+        self.assertEqual(left, {}, "the half-written backup is removed")
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(after, config)
         self.assertEqual(systemctl(calls), [])
