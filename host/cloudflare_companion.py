@@ -15,9 +15,9 @@ Desired state:
     valid Access token for that app (originRequest.access), everything else 404;
   - a proxied DNS CNAME per hostname to its tunnel.
 
-The older alias companion.newlevel.media is routed too, but its Access app
-("newlevel") is the owner's own: it is only CHECKED (it must exist and have
-allow policies only), never changed.
+companion.newlevel.media and companion-pp.newlevel.media are covered by the
+owner's own Access app ("newlevel"): they are only CHECKED (an app must cover
+them, with allow policies naming people), never changed.
 
 Writes happen in that order, after every check has passed, so a hostname is
 never routed to the rig before its Access app exists.
@@ -69,11 +69,13 @@ TUNNELS = {
 RIG_TUNNEL = {"companion-snv": "companion-snv", "linux-pp": "companion-pp"}
 MANAGED_APPS = {
     "companion-snv.newlevel.media": "Companion snv · claude",
-    "companion-pp.newlevel.media": "Companion pp · claude",
     "companion-update-snv.newlevel.media": "Companion updater snv · claude",
     "companion-update-pp.newlevel.media": "Companion updater pp · claude",
 }
-CHECKED_ALIASES = ["companion.newlevel.media"]
+# Hostnames the owner's own hand-made Access app "newlevel" covers (its domain and
+# its extra destination; policy "basic": the owner plus two people he chose).
+# Only checked, never changed.
+CHECKED_ALIASES = ["companion.newlevel.media", "companion-pp.newlevel.media"]
 POLICY_NAME = "Companion owner (OTP email) · claude"
 # Owner 2026-10-21: 30 days like the other newlevel apps. A device logged in to any
 # newlevel app gets in through the organisation's shared login without another PIN.
@@ -146,6 +148,13 @@ def app_payload(domain, name, idp_id, policy_id):
     }
 
 
+def covers(app, domain):
+    """True when the Access app protects `domain` (main domain or an extra destination)."""
+    if app.get("domain") == domain or domain in (app.get("self_hosted_domains") or []):
+        return True
+    return any(d.get("uri") == domain for d in app.get("destinations") or [])
+
+
 def app_plan(apps, payload):
     """("ok"|"create"|"update"|"conflict", app_id, reason) for a managed app.
 
@@ -154,7 +163,7 @@ def app_plan(apps, payload):
     else's; it is never overwritten.
     """
     domain = payload["domain"]
-    mine = [a for a in apps if a.get("domain") == domain]
+    mine = [a for a in apps if covers(a, domain)]
     if not mine:
         return ("create", None, f"no Access app for {domain}")
     if len(mine) > 1 or mine[0].get("name") != payload["name"]:
@@ -184,7 +193,7 @@ NAMED_SELECTORS = {"email", "email_list"}
 
 def alias_check(apps, domain):
     """None when `domain` is protected by an Access app that only lets named people in, else the problem."""
-    mine = [a for a in apps if a.get("domain") == domain]
+    mine = [a for a in apps if covers(a, domain)]
     if not mine:
         return f"{domain} is routed to the rig but has NO Access app"
     for app in mine:
@@ -334,6 +343,21 @@ def q(value):
     return urllib.parse.quote(value, safe="")
 
 
+PAGE = 100
+
+
+def list_all(cf, path):
+    """Every item of a paged list endpoint."""
+    items = []
+    sep = "&" if "?" in path else "?"
+    for page in range(1, 1000):
+        batch = cf.call("GET", f"{path}{sep}page={page}&per_page={PAGE}") or []
+        items.extend(batch)
+        if len(batch) < PAGE:
+            return items
+    raise CloudflareError(f"GET {path}: more than {1000 * PAGE} items")
+
+
 def gather(cf):
     """Every GET the plan needs. No writes."""
     zones = cf.call("GET", f"/zones?name={ZONE}")
@@ -354,10 +378,12 @@ def gather(cf):
     if not idps:
         raise CloudflareError("no one-time-PIN identity provider in the account")
     st["idp"] = idps[0]["id"]
-    st["policies"] = cf.call("GET", f"/accounts/{acc}/access/policies?per_page=1000")
-    st["apps"] = {}
-    for domain in list(MANAGED_APPS) + CHECKED_ALIASES:
-        st["apps"][domain] = cf.call("GET", f"/accounts/{acc}/access/apps?domain={q(domain)}&exact=true")
+    st["policies"] = list_all(cf, f"/accounts/{acc}/access/policies")
+    # All apps: an app can cover a hostname as an extra destination, which a
+    # domain= filter does not find (that is how companion-pp turned out to be
+    # covered by the owner's app; a POST for it answers 409).
+    all_apps = list_all(cf, f"/accounts/{acc}/access/apps")
+    st["apps"] = {d: [a for a in all_apps if covers(a, d)] for d in list(MANAGED_APPS) + CHECKED_ALIASES}
     st["alerts"] = cf.call("GET", f"/accounts/{acc}/alerting/v3/policies")
     st["dns"] = {}
     for rules in TUNNELS.values():
@@ -414,11 +440,11 @@ def run(cf, apply, out=print):
         cf.call("PUT", f"/accounts/{acc}/access/policies/{pol_id}", want_policy)
     auds = {}
     for domain in CHECKED_ALIASES:
-        auds[domain] = next((a.get("aud") for a in st["apps"][domain] if a.get("domain") == domain), None)
+        auds[domain] = next((a.get("aud") for a in st["apps"][domain] if covers(a, domain)), None)
     for domain, app_name, action, app_id, reason in app_steps:
         note(action, f"access {reason}")
         payload = app_payload(domain, app_name, st["idp"], pol_id)
-        found = next((a for a in st["apps"][domain] if a.get("domain") == domain), {})
+        found = next((a for a in st["apps"][domain] if covers(a, domain)), {})
         auds[domain] = found.get("aud")
         if apply and action == "create":
             auds[domain] = (cf.call("POST", f"/accounts/{acc}/access/apps", payload) or {}).get("aud")

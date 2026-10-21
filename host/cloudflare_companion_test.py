@@ -52,7 +52,10 @@ class FakeCloudflare:
             {"id": "r2", "type": "CNAME", "name": "companion-pp.newlevel.media", "content": f"{PP}.cfargotunnel.com", "proxied": True},
         ]
         self.policies = [{"id": "pol-basic", "name": "basic", "decision": "allow", "include": [{"email": {"email": "someone@example.com"}}]}]
+        # The owner's app covers companion-pp as an extra destination (found 2026-10-21).
         self.apps = [{"id": "a1", "aud": "aud-alias", "name": "newlevel", "domain": "companion.newlevel.media", "type": "self_hosted",
+                      "self_hosted_domains": ["companion.newlevel.media", "companion-pp.newlevel.media"],
+                      "destinations": [{"type": "public", "uri": "companion.newlevel.media"}, {"type": "public", "uri": "companion-pp.newlevel.media"}],
                       "policies": [{"id": "pol-basic", "name": "basic", "decision": "allow", "include": [{"email": {"email": "someone@example.com"}}]}]}]
         self.alerts = [{"id": "n1", "name": "Default budget alert (auto-created)", "alert_type": "billing_budget_alert", "enabled": True}]
         self.no_aud = False
@@ -85,7 +88,7 @@ class FakeCloudflare:
                 new = dict(body, id=f"pol{len(self.policies) + 1}")
                 self.policies.append(new)
                 return new
-            return copy.deepcopy(self.policies)
+            return copy.deepcopy(self.policies) if params.get("page") == "1" else []
         if base.startswith("/accounts/acc1/access/policies/") and method == "PUT":
             pid = base.rsplit("/", 1)[1]
             for i, p in enumerate(self.policies):
@@ -93,13 +96,13 @@ class FakeCloudflare:
                     self.policies[i] = dict(body, id=pid)
             return {}
         if base == "/accounts/acc1/access/apps":
+            if method == "POST" and any(cfc.covers(a, body["domain"]) for a in self.apps):
+                raise cfc.CloudflareError("HTTP 409: destination belongs to another application")
             if method == "POST":
                 new = dict(body, id=f"a{len(self.apps) + 1}", aud=None if self.no_aud else f"aud-{body['domain']}")
                 self.apps.append(new)
                 return copy.deepcopy(new)
-            assert params.get("exact") == "true", "apps must be looked up by exact domain"
-            domain = params.get("domain", "").replace("%2E", ".")
-            return [copy.deepcopy(a) for a in self.apps if a["domain"] == domain]
+            return copy.deepcopy(self.apps) if params.get("page") == "1" else []
         if base.startswith("/accounts/acc1/access/apps/") and method == "PUT":
             aid = base.rsplit("/", 1)[1]
             for i, a in enumerate(self.apps):
@@ -156,6 +159,27 @@ class PureFunctions(unittest.TestCase):
         extra = dict(want, id="p", include=want["include"] + [{"everyone": {}}])
         self.assertEqual(cfc.policy_plan([extra], want)[0], "update")
         self.assertEqual(cfc.policy_plan([dict(want, id="p", exclude=[{"ip": {"ip": "1.2.3.4/32"}}])], want)[0], "update")
+
+    def test_covers_main_domain_and_extra_destinations(self):
+        app = {"domain": "a.example", "self_hosted_domains": ["a.example", "b.example"],
+               "destinations": [{"type": "public", "uri": "a.example"}, {"type": "public", "uri": "c.example"}]}
+        for d in ("a.example", "b.example", "c.example"):
+            self.assertTrue(cfc.covers(app, d), d)
+        self.assertFalse(cfc.covers(app, "d.example"))
+
+    def test_list_all_follows_pages(self):
+        class Paged:
+            def __init__(self):
+                self.pages = []
+
+            def call(self, method, path, body=None):
+                page = int(path.split("page=")[1].split("&")[0])
+                self.pages.append(page)
+                return list(range(cfc.PAGE)) if page < 3 else [1]
+
+        cf = Paged()
+        self.assertEqual(len(cfc.list_all(cf, "/x?y=1")), 2 * cfc.PAGE + 1)
+        self.assertEqual(cf.pages, [1, 2, 3])
 
     def test_app_plan(self):
         payload = cfc.app_payload("d.example", "D · claude", "idp", "pol")
@@ -237,8 +261,8 @@ class RunAgainstTheFoundState(unittest.TestCase):
     def test_plan_writes_nothing(self):
         cf = FakeCloudflare()
         changes = cfc.run(cf, apply=False, out=quiet)
-        # policy, 4 apps, alert, both tunnels' ingress, 3 new DNS records
-        self.assertEqual(changes, 11)
+        # policy, 3 apps, alert, both tunnels' ingress, 3 new DNS records
+        self.assertEqual(changes, 10)
         self.assertEqual(cf.writes(), [])
 
     def test_apply_writes_access_before_any_routing_and_converges(self):
@@ -269,6 +293,9 @@ class RunAgainstTheFoundState(unittest.TestCase):
         self.assertEqual(snv["ingress"][-1], {"service": "http_status:404"})
         pp = {r.get("hostname"): r for r in cf.tunnels[PP]["config"]["ingress"]}
         self.assertEqual(pp["companion-update-pp.newlevel.media"]["service"], "http://localhost:8081")
+        self.assertEqual(pp["companion-pp.newlevel.media"]["originRequest"]["access"]["audTag"], ["aud-alias"],
+                         "companion-pp is protected by the owner's app, so its aud is that app's")
+        self.assertFalse([a for a in cf.apps if a["domain"] == "companion-pp.newlevel.media"], "no second app for a covered host")
         for rule in [r for r in snv["ingress"] + cf.tunnels[PP]["config"]["ingress"] if r.get("hostname")]:
             self.assertTrue(rule["originRequest"]["access"]["required"], rule["hostname"])
         names = {r["name"]: r for r in cf.dns}
@@ -286,7 +313,7 @@ class RunAgainstTheFoundState(unittest.TestCase):
             if r["name"] == "companion-snv.newlevel.media":
                 r["proxied"] = False
         for a in cf.apps:
-            if a["domain"] == "companion-pp.newlevel.media":
+            if a["domain"] == "companion-update-pp.newlevel.media":
                 a["session_duration"] = "24h"
                 a["policies"].append({"id": "bypass-everyone"})
         for p in cf.policies:
@@ -333,7 +360,8 @@ class RunAgainstTheFoundState(unittest.TestCase):
 
     def test_a_foreign_app_on_a_managed_domain_is_never_overwritten(self):
         cf = FakeCloudflare()
-        cf.apps.append({"id": "a7", "aud": "x", "name": "hand-made", "domain": "companion-pp.newlevel.media", "policies": []})
+        cf.apps.append({"id": "a7", "aud": "x", "name": "hand-made", "domain": "other.example",
+                        "destinations": [{"type": "public", "uri": "companion-update-pp.newlevel.media"}], "policies": []})
         self.assert_stops_without_writing(cf, "foreign app")
 
     def test_a_missing_aud_after_the_app_writes_routes_nothing(self):

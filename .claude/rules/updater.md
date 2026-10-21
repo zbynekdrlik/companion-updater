@@ -91,13 +91,15 @@ The NTP server comes from DHCP:
 - **Cloudflare-side state is code: `host/cloudflare_companion.py`.**
   - `plan` (exit 3 = changes pending), `apply` (re-plans and must end clean), `status` (exit 1 = a tunnel is down).
   - It needs `COMPANION_ACCESS_EMAILS` = the owner's e-mail (see local memory); `install-token` needs it too, because it refuses unless `plan` is clean. Never commit e-mail addresses here (public repo).
+  - Hostnames another Access app already covers (main domain OR extra destination: companion-pp is a destination of the owner's "newlevel" app) are only checked, never given a second app. A POST for a covered host answers 409. All apps are listed with paging, because a `domain=` filter misses extra destinations.
   - It writes in a safe order: Access policy and apps → alert → ingress → DNS. Every conflict is checked before the first write, so a hostname is never routed before its app exists.
   - The API token comes from `$CF_TOKEN_FILE`; the default is the `cloudflare-newlevel-full` key file in the secrets dir.
 - **Run token.** `install-token <ssh-host>` picks the tunnel from the rig's `hostname` (companion-snv / linux-pp), so the snv token can never land on pp. It refuses unless `plan` is clean (Access in place), checks that the token's `t` is that tunnel, writes it over stdin, and restarts the unit.
-- **`deploy.sh` step 5** installs the unit and FAILS when:
+- **`deploy.sh` step 7** (after the updater install, so the public dashboard always has its cross-site guard) installs the unit and FAILS when:
   - the token is missing (opt out with `COMPANION_TUNNEL=skip`);
   - the unit dies;
   - or the public URL does not answer `302` to `newlevelchurch.cloudflareaccess.com`.
   A `200` (public without login) stops the tunnel at once.
 - **Updater dashboard CSRF.** `GET /api/update/stream` stops and upgrades Companion. A link on another site, or one opened from mail or chat, would otherwise ride the owner's Access cookie. So the updater answers 403 to `Sec-Fetch-Site: cross-site|same-site` and to any `Sec-Fetch-Mode: navigate` (`updater/backend/src/guard.rs`); router-level tests pin the wiring. Browsers send these headers only to the HTTPS public URLs; the LAN `http://<rig>:8081` has never had authentication. The managed apps also set SameSite=Lax.
 - **Outage alert.** The notification "Companion tunnels health · claude" (`tunnel_health_event`, both tunnel ids, NO status filter) e-mails the owner on every health change. The status filter's value format is undocumented, and a wrong value would never fire. Proof that it fires: `GET /accounts/{acc}/alerting/v3/history` after a controlled stop.
+- **Tooling without a Companion upgrade.** `COMPANION_UPGRADE=skip ./deploy.sh` deploys this repo's pieces (udev, time sync, backup pusher, updater, tunnel) and leaves Companion at its version. Without it, step 8 upgrades Companion to the latest stable.
