@@ -103,7 +103,10 @@ class CompanionHandler(socketserver.StreamRequestHandler):
             # A WebSocket stays open until the client hangs up (recv gives b"").
             readable, _, _ = select.select([self.request], [], [], 10)
             if readable:
-                self.request.recv(1)
+                try:
+                    self.request.recv(1)
+                except ConnectionResetError:
+                    return  # a reset is how a client that read only the status line hangs up
 
 
 def run(config, hosts=HOSTS, ws=("101",), ws_delay=0.0, validate_exit=0, cp_fail_at=0, tries=2):
@@ -281,7 +284,9 @@ class Fails(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertEqual(after, config)
         self.assertEqual(systemctl(calls), [])
-        self.assertNotIn("restored", proc.stderr)
+        self.assertIn("could not back up", proc.stderr)
+        self.assertNotIn("restore", proc.stderr)
+        self.assertNotIn("backup kept", proc.stderr)
 
     def test_a_failed_restore_keeps_the_backup_and_never_truncates_the_config(self):
         original = CONFIG.format(value="null")
