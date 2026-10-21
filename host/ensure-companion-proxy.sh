@@ -142,9 +142,13 @@ for host in "$@"; do
     if [ "${code}" = 101 ]; then
       break
     fi
-    # The file trusts loopback but the running Companion was started before that
-    # (a hand edit, or an earlier run that died): one restart loads it.
-    if [ "${code}" = 403 ] && [ "${restarted}" = no ]; then
+    if [ "${code}" = 403 ]; then
+      # A Companion restarted by this run answers 403 deliberately; waiting changes nothing.
+      if [ "${restarted}" = yes ]; then
+        break
+      fi
+      # The file trusts loopback but the running Companion was started before that
+      # (a hand edit, or an earlier run that died): one restart loads it.
       echo "  Companion refused the web UI connection although ${CONFIG} trusts loopback; restarting it once to load that..."
       restarted=yes
       systemctl restart companion
