@@ -84,19 +84,20 @@ The NTP server comes from DHCP:
   - `companion-update-snv.newlevel.media` and `companion-update-pp.newlevel.media` serve the updater dashboard on `:8081`.
   - The older alias `companion.newlevel.media` → snv `:8000` keeps the owner's hand-made Access app "newlevel". The tool only checks that app; it never changes it.
 - **Login.** Every host is behind Cloudflare Access: one-time PIN to the owner's e-mail, reusable policy "Companion owner (OTP email) · claude", 730h session like the other newlevel apps (owner's choice of 2026-10-21; 120 days was offered and declined). A device logged in to any newlevel app gets in through the organisation's shared login without another PIN. The account has no other identity provider and no WARP.
-- **Second layer.** Each ingress rule also has `originRequest.access.required` with the app's aud, so cloudflared on the rig itself rejects requests without a valid Access token, even if the Access app is deleted or loosened.
+- **Second layer.** Each ingress rule also has `originRequest.access.required` with the app's aud, so cloudflared on the rig itself rejects requests without a valid Access token. That covers a deleted app or a bypass policy. It does NOT cover a loosened allow policy (everyone, any PIN login, email_domain): those logins get a token with the same aud. That is why the policies themselves are checked to name people only.
 - **The rig's `cloudflared.service` belongs to the presenter project** (tunnels presenter-prod / presenter-pp).
   - `cloudflared service install <token>` rewrites exactly that unit. That is how the companion tunnels sat dead unnoticed for weeks. Never use it for companion.
-  - Companion runs its own `cloudflared-companion.service` (host/): `Restart=always`, DynamicUser, `TUNNEL_TOKEN` in `/etc/cloudflared-companion.env` (root 0600).
+  - Companion runs its own `cloudflared-companion.service` (host/): `Restart=always`, DynamicUser, `TUNNEL_TOKEN` in `/etc/cloudflared-companion.env` (root 0600). It also has its own `--config /etc/cloudflared-companion.yml`, so cloudflared never falls back to the presenter's `/etc/cloudflared/config.yml`.
 - **Cloudflare-side state is code: `host/cloudflare_companion.py`.**
   - `plan` (exit 3 = changes pending), `apply` (re-plans and must end clean), `status` (exit 1 = a tunnel is down).
-  - It needs `COMPANION_ACCESS_EMAILS` = the owner's e-mail. That value is kept out of this public repo; see local memory.
+  - It needs `COMPANION_ACCESS_EMAILS` = the owner's e-mail (see local memory). It is not in the current tree. Commit 57c5c13 on public `dev` still has it, and a third person's e-mail sits in that commit's test fixture: removing them needs a history rewrite, which is the owner's decision.
   - It writes in a safe order: Access policy and apps → alert → ingress → DNS. Every conflict is checked before the first write, so a hostname is never routed before its app exists.
   - The API token comes from `$CF_TOKEN_FILE`; the default is the `cloudflare-newlevel-full` key file in the secrets dir.
-- **Run token.** `install-token <ssh-host>` picks the tunnel from the rig's `hostname` (companion-snv / linux-pp), so the snv token can never land on pp. It checks that the token's `t` is that tunnel, writes it over stdin, and restarts the unit.
+- **Run token.** `install-token <ssh-host>` picks the tunnel from the rig's `hostname` (companion-snv / linux-pp), so the snv token can never land on pp. It refuses unless `plan` is clean (Access in place), checks that the token's `t` is that tunnel, writes it over stdin, and restarts the unit.
 - **`deploy.sh` step 5** installs the unit and FAILS when:
   - the token is missing (opt out with `COMPANION_TUNNEL=skip`);
   - the unit dies;
   - or the public URL does not answer `302` to `newlevelchurch.cloudflareaccess.com`.
   A `200` (public without login) stops the tunnel at once.
+- **Updater dashboard CSRF.** `GET /api/update/stream` stops and upgrades Companion. A link on another site would otherwise ride the owner's Access cookie, so the updater answers 403 to `Sec-Fetch-Site: cross-site|same-site` (`updater/backend/src/guard.rs`). The managed apps also set SameSite=Lax.
 - **Outage alert.** The notification "Companion tunnels health · claude" (`tunnel_health_event`, both tunnel ids, NO status filter) e-mails the owner on every health change. The status filter's value format is undocumented, and a wrong value would never fire. Proof that it fires: `GET /accounts/{acc}/alerting/v3/history` after a controlled stop.

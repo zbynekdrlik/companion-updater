@@ -63,16 +63,18 @@ COMPANION_PASS=... ./deploy.sh
 COMPANION_HOST=companion-pp.lan COMPANION_USER=admin COMPANION_PASS=... ./deploy.sh
 ```
 
-The deploy script:
-1. Installs udev rules from `host/` to `/etc/udev/rules.d/`
-2. Enables NTP time sync (`host/ensure-timesync.sh`) and fails if the clock does not synchronise
-3. Installs the backup pusher (script + systemd timer)
-4. Installs the Companion web UI tunnel (`cloudflared-companion.service`); it starts once the tunnel token is installed
-5. Builds the `companion-updater` Rust binary locally and installs it as a systemd service
-6. Triggers the Companion upgrade through that freshly deployed updater
+The deploy script (`[1/9]`…`[9/9]` in its output):
+1. Checks the SSH connection
+2. Installs udev rules from `host/` to `/etc/udev/rules.d/`
+3. Enables NTP time sync (`host/ensure-timesync.sh`) and fails if the clock does not synchronise
+4. Installs the backup pusher (script + systemd timer)
+5. Installs and starts the web access tunnel (`cloudflared-companion.service`). It fails when the tunnel token is missing (opt out: `COMPANION_TUNNEL=skip`), when the unit dies, or when one of the rig's public URLs does not answer with the Cloudflare Access login
+6. Builds the `companion-updater` Rust binary locally
+7. Installs it as a systemd service
+8. Triggers the Companion upgrade through that freshly deployed updater
    (binary first, upgrade second — otherwise a fix to the upgrade path could
    never take effect in the deploy that ships it)
-7. Waits for health checks to pass
+9. Waits for health checks to pass
 
 **Requirements:** `sshpass` must be installed on the machine running the deploy.
 

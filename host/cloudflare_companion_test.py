@@ -55,6 +55,7 @@ class FakeCloudflare:
         self.apps = [{"id": "a1", "aud": "aud-alias", "name": "newlevel", "domain": "companion.newlevel.media", "type": "self_hosted",
                       "policies": [{"id": "pol-basic", "name": "basic", "decision": "allow", "include": [{"email": {"email": "someone@example.com"}}]}]}]
         self.alerts = [{"id": "n1", "name": "Default budget alert (auto-created)", "alert_type": "billing_budget_alert", "enabled": True}]
+        self.no_aud = False
 
     def writes(self):
         return [(m, p) for m, p, _b in self.calls if m != "GET"]
@@ -66,6 +67,7 @@ class FakeCloudflare:
         if base == "/zones" and params.get("name") == "newlevel.media":
             return [{"id": "zone1", "account": {"id": "acc1"}}]
         if base == "/accounts/acc1/cfd_tunnel":
+            assert params.get("is_deleted") == "false", "deleted tunnels must be excluded"
             return [{"id": tid, "name": t["name"], "status": t["status"], "connections": t["connections"], "remote_config": True}
                     for tid, t in self.tunnels.items() if t["name"] == params.get("name")]
         for tid, t in self.tunnels.items():
@@ -92,8 +94,10 @@ class FakeCloudflare:
             return {}
         if base == "/accounts/acc1/access/apps":
             if method == "POST":
-                self.apps.append(dict(body, id=f"a{len(self.apps) + 1}", aud=f"aud-{body['domain']}"))
-                return {}
+                new = dict(body, id=f"a{len(self.apps) + 1}", aud=None if self.no_aud else f"aud-{body['domain']}")
+                self.apps.append(new)
+                return copy.deepcopy(new)
+            assert params.get("exact") == "true", "apps must be looked up by exact domain"
             domain = params.get("domain", "").replace("%2E", ".")
             return [copy.deepcopy(a) for a in self.apps if a["domain"] == domain]
         if base.startswith("/accounts/acc1/access/apps/") and method == "PUT":
@@ -101,6 +105,7 @@ class FakeCloudflare:
             for i, a in enumerate(self.apps):
                 if a["id"] == aid:
                     self.apps[i] = dict(body, id=aid, aud=a["aud"])
+                    return copy.deepcopy(self.apps[i])
             return {}
         if base == "/accounts/acc1/alerting/v3/policies":
             if method == "POST":
@@ -167,10 +172,13 @@ class PureFunctions(unittest.TestCase):
         self.assertIsNone(cfc.alias_check([good], "c.example"))
         self.assertIn("NO Access app", cfc.alias_check([], "c.example"))
         self.assertIn("no policy", cfc.alias_check([dict(good, policies=[])], "c.example"))
-        bypass = dict(good, policies=good["policies"] + [{"name": "open", "decision": "bypass", "include": [{"everyone": {}}]}])
-        self.assertIn("bypass/everyone", cfc.alias_check([bypass], "c.example"))
-        everyone = dict(good, policies=[{"name": "all", "decision": "allow", "include": [{"everyone": {}}]}])
-        self.assertIn("bypass/everyone", cfc.alias_check([everyone], "c.example"))
+        bypass = dict(good, policies=good["policies"] + [{"name": "open", "decision": "bypass", "include": [{"email": {"email": "x@y"}}]}])
+        self.assertIn("is a bypass", cfc.alias_check([bypass], "c.example"))
+        for loose in ({"everyone": {}}, {"login_method": {"id": "otp"}}, {"email_domain": {"domain": "gmail.com"}}, {"ip": {"ip": "0.0.0.0/0"}}):
+            app = dict(good, policies=[{"name": "p", "decision": "allow", "include": [{"email": {"email": "x@y"}}, loose]}])
+            self.assertIn("not by named people", cfc.alias_check([app], "c.example"), loose)
+        named = dict(good, policies=[{"name": "p", "decision": "allow", "include": [{"email_list": {"id": "l"}}, {"group": {"id": "g"}}]}])
+        self.assertIsNone(cfc.alias_check([named], "c.example"))
 
     def test_ingress_requires_the_access_token_and_compares_it(self):
         want = cfc.desired_ingress([("a.example", "http://localhost:8000", "aud-a")])
@@ -183,6 +191,12 @@ class PureFunctions(unittest.TestCase):
         other_aud = copy.deepcopy(want)
         other_aud[0]["originRequest"]["access"]["audTag"] = ["aud-b"]
         self.assertFalse(cfc.ingress_matches(other_aud, want))
+        other_port = copy.deepcopy(want)
+        other_port[0]["service"] = "http://localhost:8081"
+        self.assertFalse(cfc.ingress_matches(other_port, want))
+        other_team = copy.deepcopy(want)
+        other_team[0]["originRequest"]["access"]["teamName"] = "someoneelse"
+        self.assertFalse(cfc.ingress_matches(other_team, want))
         self.assertFalse(cfc.ingress_matches(None, want))
 
     def test_dns_plan(self):
@@ -191,6 +205,11 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(cfc.dns_plan([good], "h", "t1")[:2], ("ok", "x"))
         self.assertEqual(cfc.dns_plan([dict(good, proxied=False)], "h", "t1")[:2], ("update", "x"))
         self.assertEqual(cfc.dns_plan([dict(good, type="A", content="1.2.3.4")], "h", "t1")[0], "conflict")
+        foreign = dict(good, content="someone.example.com")
+        self.assertEqual(cfc.dns_plan([foreign], "h", "t1", {"t1.cfargotunnel.com"})[0], "conflict")
+        self.assertEqual(cfc.dns_plan([dict(foreign, comment=cfc.DNS_COMMENT)], "h", "t1")[0], "update")
+        other_tunnel = dict(good, content="t2.cfargotunnel.com")
+        self.assertEqual(cfc.dns_plan([other_tunnel], "h", "t1", {"t2.cfargotunnel.com"})[0], "update")
 
     def test_alert_has_no_status_filter_so_it_cannot_be_silently_wrong(self):
         payload = cfc.alert_payload(["t2", "t1"], [OWNER])
@@ -269,6 +288,21 @@ class RunAgainstTheFoundState(unittest.TestCase):
         cf.calls.clear()
         self.assertEqual(cfc.run(cf, apply=False, out=quiet), 4)
         apply_and_converge(self, cf)
+        for drift in (
+            lambda: [a.update(filters={"tunnel_id": [SNV]}) for a in cf.alerts if a["name"] == cfc.ALERT_NAME],
+            lambda: [a.update(mechanisms={"email": [{"id": "x@y"}]}) for a in cf.alerts if a["name"] == cfc.ALERT_NAME],
+            lambda: [a.update(alert_type="other") for a in cf.alerts if a["name"] == cfc.ALERT_NAME],
+            lambda: [a.update(type="ssh") for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
+            lambda: [a.update(allowed_idps=[]) for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
+            lambda: [a.update(auto_redirect_to_identity=False) for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
+            lambda: [a.update(same_site_cookie_attribute=None) for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
+            lambda: [p.update(require=[{"geo": {"country_code": "SK"}}]) for p in cf.policies if p["name"] == cfc.POLICY_NAME],
+            lambda: [r.update(service="http://localhost:9999") for r in cf.tunnels[PP]["config"]["ingress"][:1]],
+        ):
+            drift()
+            self.assertEqual(cfc.run(cf, apply=False, out=quiet), 1)
+            apply_and_converge(self, cf)
+        apply_and_converge(self, cf)
         writes = cf.writes()
         self.assertIn("PATCH", [m for m, _p in writes])
         self.assertTrue(any(m == "PUT" and "/access/apps/" in p for m, p in writes))
@@ -291,6 +325,19 @@ class RunAgainstTheFoundState(unittest.TestCase):
         cf = FakeCloudflare()
         cf.apps.append({"id": "a7", "aud": "x", "name": "hand-made", "domain": "companion-pp.newlevel.media", "policies": []})
         self.assert_stops_without_writing(cf, "foreign app")
+
+    def test_a_missing_aud_after_the_app_writes_routes_nothing(self):
+        cf = FakeCloudflare()
+        cf.no_aud = True
+        with self.assertRaises(cfc.CloudflareError) as ctx:
+            cfc.run(cf, apply=True, out=quiet)
+        self.assertIn("no Access aud", str(ctx.exception))
+        self.assertFalse([p for _m, p in cf.writes() if "/configurations" in p or "/dns_records" in p])
+
+    def test_a_foreign_cname_stops_before_any_write(self):
+        cf = FakeCloudflare()
+        cf.dns.append({"id": "r9", "type": "CNAME", "name": "companion-snv.newlevel.media", "content": "elsewhere.example.com", "proxied": True})
+        self.assert_stops_without_writing(cf, "not ours")
 
     def test_an_unprotected_alias_stops_the_run(self):
         cf = FakeCloudflare()
@@ -383,8 +430,30 @@ class InstallToken(unittest.TestCase):
     def stdin_write(self):
         return [c for c in self.calls if "/dev/stdin" in c[0][-1]]
 
+    def converged(self):
+        cf = FakeCloudflare()
+        cfc.run(cf, apply=True, out=quiet)
+        return cf
+
+    def test_refused_while_cloudflare_is_not_set_up(self):
+        with self.assertRaises(cfc.CloudflareError) as ctx:
+            cfc.install_token(FakeCloudflare(), "companion-pp.lan", runner=self.runner_for("linux-pp"))
+        self.assertIn("run `apply` first", str(ctx.exception))
+        self.assertEqual(self.stdin_write(), [], "no token may be installed before Access is in place")
+
+    def test_user_override_restart_recheck_and_missing_unit(self):
+        os.environ["COMPANION_USER"] = "admin"
+        try:
+            cfc.install_token(self.converged(), "companion-pp.lan", runner=self.runner_for("linux-pp"))
+        finally:
+            del os.environ["COMPANION_USER"]
+        self.assertTrue(all("admin@companion-pp.lan" in c[0] for c in self.calls))
+        start = [c for c in self.calls if "systemctl" in c[0][-1]][0][0][-1]
+        self.assertIn("sudo systemctl enable cloudflared-companion && sudo systemctl restart cloudflared-companion && sleep 5 && systemctl is-active cloudflared-companion", start)
+        self.assertIn("unit not installed (run deploy.sh)", start)
+
     def test_the_rigs_own_tunnel_goes_over_stdin_and_the_unit_is_restarted(self):
-        msg = cfc.install_token(FakeCloudflare(), "companion-pp.lan", runner=self.runner_for("linux-pp"))
+        msg = cfc.install_token(self.converged(), "companion-pp.lan", runner=self.runner_for("linux-pp"))
         write = self.stdin_write()[0]
         self.assertEqual(write[1]["input"], f"TUNNEL_TOKEN={run_value(PP)}\n")
         self.assertIn("install -m 0600 -o root -g root /dev/stdin /etc/cloudflared-companion.env", write[0][-1])
@@ -395,26 +464,48 @@ class InstallToken(unittest.TestCase):
         self.assertNotIn(run_value(PP), msg)
 
     def test_snv_rig_gets_the_snv_tunnel(self):
-        cfc.install_token(FakeCloudflare(), "companion.lan", runner=self.runner_for("companion-snv"))
+        cfc.install_token(self.converged(), "companion.lan", runner=self.runner_for("companion-snv"))
         self.assertEqual(self.stdin_write()[0][1]["input"], f"TUNNEL_TOKEN={run_value(SNV)}\n")
 
     def test_unknown_rig_failed_ssh_and_a_failed_start_are_errors(self):
         with self.assertRaises(cfc.CloudflareError):
-            cfc.install_token(FakeCloudflare(), "stream.lan", runner=self.runner_for("stream-pp"))
+            cfc.install_token(self.converged(), "stream.lan", runner=self.runner_for("stream-pp"))
         with self.assertRaises(cfc.CloudflareError):
-            cfc.install_token(FakeCloudflare(), "h", runner=self.runner_for("linux-pp", fail_on="hostname"))
+            cfc.install_token(self.converged(), "h", runner=self.runner_for("linux-pp", fail_on="hostname"))
         with self.assertRaises(cfc.CloudflareError) as ctx:
-            cfc.install_token(FakeCloudflare(), "h", runner=self.runner_for("linux-pp", fail_on="systemctl"))
+            cfc.install_token(self.converged(), "h", runner=self.runner_for("linux-pp", fail_on="systemctl"))
         self.assertIn("did not start", str(ctx.exception))
 
     def test_a_token_for_another_tunnel_is_refused(self):
-        cf = FakeCloudflare()
+        cf = self.converged()
         real = cf.call
         cf.call = lambda m, p, b=None: run_value(SNV) if p.endswith(f"{PP}/token") else real(m, p, b)
         with self.assertRaises(cfc.CloudflareError) as ctx:
             cfc.install_token(cf, "h", runner=self.runner_for("linux-pp"))
         self.assertIn("another tunnel", str(ctx.exception))
         self.assertEqual(self.stdin_write(), [])
+
+
+class Main(unittest.TestCase):
+    def test_exit_codes(self):
+        cf = FakeCloudflare()
+        self.assertEqual(cfc.main(["x", "plan"], cf=cf), 3, "pending changes")
+        self.assertEqual(cfc.main(["x", "status"], cf=cf), 1, "tunnels down")
+        self.assertEqual(cfc.main(["x", "apply"], cf=cf), 0)
+        self.assertEqual(cfc.main(["x", "plan"], cf=cf), 0, "clean after apply")
+        for t in cf.tunnels.values():
+            t["status"], t["connections"] = "healthy", [{}]
+        self.assertEqual(cfc.main(["x", "status"], cf=cf), 0)
+        self.assertEqual(cfc.main(["x", "bogus"], cf=cf), 2)
+
+    def test_apply_that_does_not_converge_is_an_error(self):
+        cf = FakeCloudflare()
+        real = cf.call
+        # a PUT of the ingress that the API silently ignores
+        cf.call = lambda m, p, b=None: {} if (m == "PUT" and "/configurations" in p) else real(m, p, b)
+        with self.assertRaises(cfc.CloudflareError) as ctx:
+            cfc.main(["x", "apply"], cf=cf)
+        self.assertIn("still pending", str(ctx.exception))
 
 
 if __name__ == "__main__":

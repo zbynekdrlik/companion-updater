@@ -140,6 +140,7 @@ def app_payload(domain, name, idp_id, policy_id):
         "auto_redirect_to_identity": True,
         "app_launcher_visible": True,
         "http_only_cookie_attribute": True,
+        "same_site_cookie_attribute": "lax",
         "policies": [{"id": policy_id, "precedence": 1}],
     }
 
@@ -160,7 +161,7 @@ def app_plan(apps, payload):
         return ("conflict", None, f"{domain} already has Access app(s) {names}; not overwriting a foreign app")
     app = mine[0]
     diffs = []
-    for key in ("type", "session_duration", "allowed_idps", "auto_redirect_to_identity"):
+    for key in ("type", "session_duration", "allowed_idps", "auto_redirect_to_identity", "same_site_cookie_attribute"):
         if app.get(key) != payload[key]:
             diffs.append(f"{key} {app.get(key)!r} -> {payload[key]!r}")
     have = [p.get("id") for p in app.get("policies") or []]
@@ -172,8 +173,15 @@ def app_plan(apps, payload):
     return ("update", app.get("id"), f"{domain}: " + "; ".join(diffs))
 
 
+# Include selectors that name people. Anything else (everyone, login_method,
+# email_domain, ip, geo, any_valid_service_token ...) lets in people nobody listed,
+# and those logins get an Access token with the same aud, so cloudflared's own
+# check would not stop them either.
+NAMED_SELECTORS = {"email", "email_list", "group"}
+
+
 def alias_check(apps, domain):
-    """None when `domain` is protected by an allow-only Access app, else the problem."""
+    """None when `domain` is protected by an Access app that only lets named people in, else the problem."""
     mine = [a for a in apps if a.get("domain") == domain]
     if not mine:
         return f"{domain} is routed to the rig but has NO Access app"
@@ -181,9 +189,12 @@ def alias_check(apps, domain):
         policies = app.get("policies") or []
         if not policies:
             return f"{domain}: Access app '{app.get('name')}' has no policy"
-        bad = [p.get("name") for p in policies if p.get("decision") != "allow" or any("everyone" in r for r in p.get("include") or [])]
-        if bad:
-            return f"{domain}: Access app '{app.get('name')}' has non-owner policies {bad} (bypass/everyone)"
+        for p in policies:
+            if p.get("decision") != "allow":
+                return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' is a {p.get('decision')}, not an allow"
+            loose = sorted({k for r in p.get("include") or [] for k in r} - NAMED_SELECTORS)
+            if loose:
+                return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' lets in by {loose}, not by named people"
     return None
 
 
@@ -211,8 +222,12 @@ def ingress_matches(current, desired):
     return _ingress_key(current) == _ingress_key(desired)
 
 
-def dns_plan(records, hostname, tunnel_id):
-    """("ok"|"create"|"update"|"conflict", record_id, reason): `hostname` must be a proxied CNAME to the tunnel."""
+def dns_plan(records, hostname, tunnel_id, our_targets=()):
+    """("ok"|"create"|"update"|"conflict", record_id, reason): `hostname` must be a proxied CNAME to the tunnel.
+
+    An existing CNAME is only re-pointed when it is ours: it targets one of our
+    tunnels or carries DNS_COMMENT. Anything else belongs to somebody else.
+    """
     target = f"{tunnel_id}.cfargotunnel.com"
     mine = [r for r in records if r.get("name") == hostname]
     if not mine:
@@ -223,6 +238,8 @@ def dns_plan(records, hostname, tunnel_id):
     rec = mine[0]
     if rec.get("content") == target and rec.get("proxied") is True:
         return ("ok", rec.get("id"), f"{hostname} -> tunnel")
+    if rec.get("content") not in set(our_targets) | {target} and rec.get("comment") != DNS_COMMENT:
+        return ("conflict", None, f"{hostname} is a CNAME to {rec.get('content')}, not ours; not touching it")
     return ("update", rec.get("id"), f"{hostname} -> {rec.get('content')} (proxied={rec.get('proxied')}), want the tunnel")
 
 
@@ -359,9 +376,10 @@ def run(cf, apply, out=print):
         if problem:
             raise CloudflareError(problem)
     dns_steps = []
+    our_targets = {f"{t['id']}.cfargotunnel.com" for t in st["tunnels"].values()}
     for name, rules in TUNNELS.items():
         for host, _service in rules:
-            action, rec_id, reason = dns_plan(st["dns"][host], host, st["tunnels"][name]["id"])
+            action, rec_id, reason = dns_plan(st["dns"][host], host, st["tunnels"][name]["id"], our_targets)
             if action == "conflict":
                 raise CloudflareError(f"dns {reason}")
             dns_steps.append((name, host, action, rec_id, reason))
@@ -392,13 +410,24 @@ def run(cf, apply, out=print):
         pol_id = cf.call("POST", f"/accounts/{acc}/access/policies", want_policy)["id"]
     elif apply and pol_action == "update":
         cf.call("PUT", f"/accounts/{acc}/access/policies/{pol_id}", want_policy)
+    auds = {}
+    for domain in CHECKED_ALIASES:
+        auds[domain] = next((a.get("aud") for a in st["apps"][domain] if a.get("domain") == domain), None)
     for domain, app_name, action, app_id, reason in app_steps:
         note(action, f"access {reason}")
         payload = app_payload(domain, app_name, st["idp"], pol_id)
+        found = next((a for a in st["apps"][domain] if a.get("domain") == domain), {})
+        auds[domain] = found.get("aud")
         if apply and action == "create":
-            cf.call("POST", f"/accounts/{acc}/access/apps", payload)
+            auds[domain] = (cf.call("POST", f"/accounts/{acc}/access/apps", payload) or {}).get("aud")
         elif apply and action == "update":
-            cf.call("PUT", f"/accounts/{acc}/access/apps/{app_id}", payload)
+            auds[domain] = (cf.call("PUT", f"/accounts/{acc}/access/apps/{app_id}", payload) or {}).get("aud") or auds[domain]
+    if apply:
+        missing = [d for d, aud in auds.items() if not aud]
+        if missing:
+            # Never route a host with a placeholder aud: cloudflared would reject
+            # every request, and the next plan would not even see why.
+            raise CloudflareError(f"no Access aud for {', '.join(missing)} after the app writes; nothing was routed")
 
     # 3. the health notification.
     alert = alert_payload([t["id"] for t in st["tunnels"].values()], emails)
@@ -409,16 +438,10 @@ def run(cf, apply, out=print):
     elif apply and action == "update":
         cf.call("PUT", f"/accounts/{acc}/alerting/v3/policies/{alert_id}", alert)
 
-    # 4. ingress, with the apps' aud tags (re-read after a create).
-    auds = {}
-    for domain in list(MANAGED_APPS) + CHECKED_ALIASES:
-        apps = st["apps"][domain]
-        if apply and domain in MANAGED_APPS:
-            apps = cf.call("GET", f"/accounts/{acc}/access/apps?domain={q(domain)}&exact=true")
-        auds[domain] = apps[0].get("aud") if apps else "<aud of the new app>"
+    # 4. ingress, with the apps' aud tags.
     for name, rules in TUNNELS.items():
         t = st["tunnels"][name]
-        want = desired_ingress([(h, svc, auds[h]) for h, svc in rules])
+        want = desired_ingress([(h, svc, auds.get(h) or "<aud of the new app>") for h, svc in rules])
         shown = ", ".join(f"{h} -> {svc}" for h, svc in rules)
         if ingress_matches(t["config"].get("ingress"), want):
             note("ok", f"tunnel {name}: ingress {shown}, Access token required")
@@ -471,6 +494,11 @@ def install_token(cf, ssh_host, runner=subprocess.run):
     if rig not in RIG_TUNNEL:
         raise CloudflareError(f"{ssh_host} is '{rig}', not a known rig ({', '.join(RIG_TUNNEL)})")
     tunnel = RIG_TUNNEL[rig]
+    # Starting the connector publishes the tunnel's hostnames: only when the
+    # Cloudflare side is exactly as wanted (Access apps, origin token check).
+    pending = run(cf, apply=False, out=lambda _l: None)
+    if pending:
+        raise CloudflareError(f"Cloudflare has {pending} pending change(s); run `apply` first, then install-token")
     st = gather(cf)
     tid = st["tunnels"][tunnel]["id"]
     token = cf.call("GET", f"/accounts/{st['account']}/cfd_tunnel/{tid}/token")
@@ -487,9 +515,9 @@ def install_token(cf, ssh_host, runner=subprocess.run):
     return f"{ENV_FILE} written on {ssh_host} ({rig}) for tunnel {tunnel} (token length {len(token)}); {UNIT}: {start.stdout.strip()}"
 
 
-def main(argv):
+def main(argv, cf=None, runner=subprocess.run):
     cmd = argv[1] if len(argv) > 1 else "plan"
-    cf = Cloudflare(read_token())
+    cf = cf or Cloudflare(read_token())
     if cmd == "plan":
         changes = run(cf, apply=False)
         print(f"{changes} change(s) needed")
@@ -504,7 +532,7 @@ def main(argv):
     if cmd == "status":
         return 1 if status(cf) else 0
     if cmd == "install-token" and len(argv) == 3:
-        print(install_token(cf, argv[2]))
+        print(install_token(cf, argv[2], runner=runner))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

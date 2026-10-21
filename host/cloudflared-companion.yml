@@ -1,0 +1,6 @@
+# cloudflared settings for the Companion web UI tunnel (companion-updater#26).
+# Its own file, passed with --config, so cloudflared never falls back to the
+# default /etc/cloudflared/config.yml, which belongs to the presenter project's
+# tunnel. Ingress lives in Cloudflare (remotely managed tunnel); the run token
+# comes from /etc/cloudflared-companion.env.
+no-autoupdate: true

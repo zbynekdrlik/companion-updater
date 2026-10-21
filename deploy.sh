@@ -89,16 +89,20 @@ fi
 echo "[5/9] Installing the Companion web UI tunnel..."
 remote_copy "${SCRIPT_DIR}/host/cloudflared-companion.service" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/cloudflared-companion.service"
 remote "sudo install -m 0644 /tmp/cloudflared-companion.service /etc/systemd/system/cloudflared-companion.service && rm /tmp/cloudflared-companion.service"
+remote_copy "${SCRIPT_DIR}/host/cloudflared-companion.yml" "${COMPANION_USER}@${COMPANION_HOST}:/tmp/cloudflared-companion.yml"
+remote "sudo install -m 0644 /tmp/cloudflared-companion.yml /etc/cloudflared-companion.yml && rm /tmp/cloudflared-companion.yml"
 remote "sudo systemctl daemon-reload"
 RIG="$(remote hostname)"
+# Every hostname the rig's tunnel serves (keep in sync with TUNNELS in
+# host/cloudflare_companion.py); each must answer with the Access login.
 case "${RIG}" in
-  companion-snv) PUBLIC_HOST="companion-snv.newlevel.media" ;;
-  linux-pp) PUBLIC_HOST="companion-pp.newlevel.media" ;;
-  *) PUBLIC_HOST="" ;;
+  companion-snv) PUBLIC_HOSTS="companion-snv.newlevel.media companion-update-snv.newlevel.media companion.newlevel.media" ;;
+  linux-pp) PUBLIC_HOSTS="companion-pp.newlevel.media companion-update-pp.newlevel.media" ;;
+  *) PUBLIC_HOSTS="" ;;
 esac
 if [ "${COMPANION_TUNNEL:-}" = "skip" ]; then
   echo "  COMPANION_TUNNEL=skip: unit installed, not started."
-elif [ -z "${PUBLIC_HOST}" ]; then
+elif [ -z "${PUBLIC_HOSTS}" ]; then
   echo "ERROR: ${COMPANION_HOST} is '${RIG}', which has no web hostname (add it to deploy.sh and host/cloudflare_companion.py, or set COMPANION_TUNNEL=skip)"
   exit 1
 elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
@@ -117,19 +121,23 @@ else
     echo "ERROR: cloudflared-companion died after starting on ${RIG} (sudo journalctl -u cloudflared-companion -n 50)"
     exit 1
   fi
-  # The public URL must answer with the Access login. A 200 would mean the rig is
-  # reachable without login: stop the tunnel at once.
-  answer="$(curl -s -o /dev/null -m 20 -w '%{http_code} %{redirect_url}' "https://${PUBLIC_HOST}/" || true)"
-  case "${answer}" in
-    302\ *cloudflareaccess.com*) echo "  cloudflared-companion running; https://${PUBLIC_HOST} asks for the Access login." ;;
-    200\ *)
-      remote "sudo systemctl stop cloudflared-companion"
-      echo "ERROR: https://${PUBLIC_HOST} answered 200 WITHOUT login; tunnel stopped. Run host/cloudflare_companion.py plan."
-      exit 1 ;;
-    *)
-      echo "ERROR: https://${PUBLIC_HOST} answered '${answer}', not the Access login (host/cloudflare_companion.py status / plan)"
-      exit 1 ;;
-  esac
+  # Every public URL must answer with the Access login. A 200 means the rig is
+  # reachable without login: stop AND disable the tunnel (a reboot must not
+  # publish it again).
+  for host in ${PUBLIC_HOSTS}; do
+    answer="$(curl -s -o /dev/null -m 20 -w '%{http_code} %{redirect_url}' "https://${host}/" || true)"
+    case "${answer}" in
+      302\ https://newlevelchurch.cloudflareaccess.com/*) echo "  https://${host} asks for the Access login." ;;
+      200\ *)
+        remote "sudo systemctl disable --now cloudflared-companion"
+        echo "ERROR: https://${host} answered 200 WITHOUT login; tunnel stopped and disabled. Run host/cloudflare_companion.py plan."
+        exit 1 ;;
+      *)
+        echo "ERROR: https://${host} answered '${answer}', not the Access login (host/cloudflare_companion.py status / plan)"
+        exit 1 ;;
+    esac
+  done
+  echo "  cloudflared-companion running."
 fi
 
 # Step 6: Build companion-updater binary locally

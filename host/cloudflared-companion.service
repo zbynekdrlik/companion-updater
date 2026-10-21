@@ -11,6 +11,7 @@ Description=cloudflared (Companion web UI tunnel)
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/etc/cloudflared-companion.env
+ConditionPathExists=/etc/cloudflared-companion.yml
 
 [Service]
 Type=notify
@@ -20,7 +21,7 @@ TimeoutStartSec=60
 EnvironmentFile=/etc/cloudflared-companion.env
 # /usr/local/bin/cloudflared is a symlink to this file on both rigs; the binary is
 # kept up to date by cloudflared-update.timer.
-ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel --config /etc/cloudflared-companion.yml run
 # always: cloudflared exits 0 on SIGTERM, so a `pkill cloudflared` aimed at the
 # presenter's tunnel would otherwise leave this one down until a reboot.
 Restart=always
