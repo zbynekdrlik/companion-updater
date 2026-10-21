@@ -120,7 +120,7 @@ class PureFunctions(unittest.TestCase):
     def test_access_payload_lets_the_owner_in_by_otp_with_a_long_session(self):
         p = cfc.access_app_payload("companion-pp.newlevel.media", "Companion pp", "idp-otp")
         self.assertEqual(p["allowed_idps"], ["idp-otp"])
-        self.assertEqual(p["session_duration"], "2880h")  # 120 days, owner 2026-10-21
+        self.assertEqual(p["session_duration"], "730h")  # 30 days like the other apps, owner 2026-10-21
         self.assertEqual(p["policies"][0]["include"], [{"email": {"email": "drlik.zbynek@gmail.com"}}])
         self.assertEqual(p["policies"][0]["decision"], "allow")
 
