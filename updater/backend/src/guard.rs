@@ -2,33 +2,46 @@
 //!
 //! The dashboard is published at companion-update-*.newlevel.media behind
 //! Cloudflare Access (companion-updater#26). Access protects against strangers,
-//! not against a cross-site request riding the owner's Access cookie: a link to
-//! `/api/update/stream` on another site would start a Companion upgrade on a
-//! live rig. Browsers mark every request with `Sec-Fetch-Site`; the dashboard's
-//! own EventSource is `same-origin`, a bookmark or typed URL is `none`, and
-//! `deploy.sh`'s curl sends no such header at all.
+//! not against a request riding the owner's Access cookie: a link on another
+//! site, or one opened from mail or chat, would navigate to
+//! `/api/update/stream` and start a Companion upgrade on a live rig.
+//!
+//! Browsers send Fetch Metadata headers to secure origins (the HTTPS public
+//! URLs). The dashboard's own EventSource is `Sec-Fetch-Site: same-origin`,
+//! `Sec-Fetch-Mode: cors`; deploy.sh's curl sends no such headers. Everything a
+//! browser does by navigating (links, bookmarks, typed URLs) is refused.
+//!
+//! Over plain `http://<rig>:8081` on the LAN browsers send none of these
+//! headers, so this guard does nothing there. That LAN path has never had
+//! authentication; it is reachable only inside the church networks.
 
 use axum::http::{HeaderMap, StatusCode};
 
-/// `Err` (403) for a request a browser made on behalf of another site.
+/// `Err` (403) for a browser request that did not come from the dashboard page:
+/// cross-site / same-site, or any top-level navigation.
 pub fn reject_cross_site(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
     let site = headers
         .get("sec-fetch-site")
         .and_then(|v| v.to_str().ok())
         .map(|v| v.trim().to_ascii_lowercase());
-    match site.as_deref() {
-        Some(s @ ("cross-site" | "same-site")) => {
-            tracing::warn!(
-                sec_fetch_site = s,
-                "refused an upgrade request made from another site"
-            );
-            Err((
-                StatusCode::FORBIDDEN,
-                "Updates can only be started from the dashboard itself.".into(),
-            ))
-        }
-        _ => Ok(()),
+    let mode = headers
+        .get("sec-fetch-mode")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().to_ascii_lowercase());
+    let cross_site = matches!(site.as_deref(), Some("cross-site" | "same-site"));
+    let navigation = mode.as_deref() == Some("navigate");
+    if cross_site || navigation {
+        tracing::warn!(
+            sec_fetch_site = site.as_deref().unwrap_or("-"),
+            sec_fetch_mode = mode.as_deref().unwrap_or("-"),
+            "refused an upgrade request that did not come from the dashboard"
+        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Updates can only be started from the dashboard itself.".into(),
+        ));
     }
+    Ok(())
 }
 
 #[cfg(test)]
