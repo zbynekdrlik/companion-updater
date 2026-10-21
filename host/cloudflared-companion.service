@@ -1,0 +1,24 @@
+# Cloudflare tunnel for the Companion web UI (companion-updater#26).
+#
+# A second cloudflared, next to the presenter project's cloudflared.service:
+# `cloudflared service install` only ever writes cloudflared.service, so neither
+# project can knock out the other's tunnel. The tunnel run token lives in
+# /etc/cloudflared-companion.env (TUNNEL_TOKEN=..., root 0600), written by
+# `host/cloudflare_companion.py install-token`; it never appears in this file
+# or on a command line.
+[Unit]
+Description=cloudflared (Companion web UI tunnel)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/cloudflared-companion.env
+
+[Service]
+Type=notify
+TimeoutStartSec=15
+EnvironmentFile=/etc/cloudflared-companion.env
+ExecStart=/usr/bin/cloudflared --no-autoupdate tunnel run
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

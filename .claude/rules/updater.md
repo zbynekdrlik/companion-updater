@@ -2,6 +2,7 @@
 paths:
   - "updater/**"
   - "deploy.sh"
+  - "host/**"
 ---
 
 # companion-updater — mechanics and traps
@@ -75,3 +76,13 @@ The NTP server comes from DHCP:
 - snv uses `strih.lan` (10.77.9.202), which itself runs about 0.9 s off.
 
 "Synchronised" only means synchronised to that server. Measure the real offset with an SNTP query to `pool.ntp.org`, not with `timedatectl`.
+
+## Web UI over Cloudflare (#26)
+
+- **What serves what.** `https://companion-snv.newlevel.media` and `https://companion-pp.newlevel.media` serve the rig's Companion UI (`http://localhost:8000`). Each is behind Cloudflare Access with one-time-PIN e-mail login for the owner and a 730h session. The older alias `companion.newlevel.media` still works and keeps the owner's hand-made Access app "newlevel".
+- **The rig's `cloudflared.service` belongs to the presenter project** (tunnels presenter-prod / presenter-pp).
+  - `cloudflared service install <token>` rewrites exactly that unit. That is how the companion tunnels went down unnoticed. Never use it for companion.
+  - The companion tunnel runs as its own unit, `cloudflared-companion.service` (host/), with `TUNNEL_TOKEN` in `/etc/cloudflared-companion.env` (root 0600). `deploy.sh` step 5 installs the unit and starts it only when that env file exists.
+- **Cloudflare-side state is code.** Tunnel ingress, DNS CNAMEs and Access apps live in `host/cloudflare_companion.py plan|apply`. It reads the account-owned API token from `$CF_TOKEN_FILE`; the default is the `cloudflare-newlevel-full` key file in the secrets dir. `install-token <tunnel> <ssh-host>` writes the run token to the rig without printing it.
+- **Outage alert.** A Cloudflare notification, "Companion tunnels down · claude" (`tunnel_health_event`, both tunnel ids, status DOWN), e-mails the owner. It exists because the tunnels sat dead for weeks unnoticed.
+- **Verify.** An anonymous request must get the Access login: a 302 to `newlevelchurch.cloudflareaccess.com`. Then check a browser login. A tunnel shown as `down` in the Cloudflare API means nothing on the rig runs it.
