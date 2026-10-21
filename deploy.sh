@@ -107,7 +107,7 @@ elif [ -z "${PUBLIC_HOSTS}" ]; then
   exit 1
 elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
   echo "ERROR: no tunnel token on ${RIG}. Run on dev1:"
-  echo "  COMPANION_PASS=... host/cloudflare_companion.py install-token ${COMPANION_HOST}"
+  echo "  COMPANION_ACCESS_EMAILS=<owner e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token ${COMPANION_HOST}"
   echo "  (or deploy without web access: COMPANION_TUNNEL=skip)"
   exit 1
 else

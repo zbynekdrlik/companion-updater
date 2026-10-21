@@ -123,7 +123,7 @@ COMPANION_ACCESS_EMAILS=<owner e-mail> host/cloudflare_companion.py apply
 host/cloudflare_companion.py status                                         # exit 1 = a tunnel is down
 
 # The rig's run token (the tunnel is chosen from the rig's hostname; never printed)
-COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
+COMPANION_ACCESS_EMAILS=<owner e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
 ```
 
 Then `deploy.sh` installs the unit. It fails if the tunnel token is missing (opt out with `COMPANION_TUNNEL=skip`) or if the public URL does not answer with the Access login.

@@ -167,6 +167,14 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(cfc.app_plan([bypass], payload)[0], "update", "an extra policy is drift")
         self.assertEqual(cfc.app_plan([dict(same, name="hand-made")], payload)[0], "conflict")
 
+    def test_app_payload_pins_the_cookie_and_login(self):
+        p = cfc.app_payload("d.example", "D", "idp-otp", "pol")
+        self.assertEqual(p["same_site_cookie_attribute"], "lax")
+        self.assertTrue(p["http_only_cookie_attribute"])
+        self.assertEqual(p["allowed_idps"], ["idp-otp"])
+        self.assertEqual(p["session_duration"], "730h")
+        self.assertEqual(p["policies"], [{"id": "pol", "precedence": 1}])
+
     def test_alias_check(self):
         good = {"name": "n", "domain": "c.example", "policies": [{"name": "basic", "decision": "allow", "include": [{"email": {"email": "x@y"}}]}]}
         self.assertIsNone(cfc.alias_check([good], "c.example"))
@@ -177,8 +185,10 @@ class PureFunctions(unittest.TestCase):
         for loose in ({"everyone": {}}, {"login_method": {"id": "otp"}}, {"email_domain": {"domain": "gmail.com"}}, {"ip": {"ip": "0.0.0.0/0"}}):
             app = dict(good, policies=[{"name": "p", "decision": "allow", "include": [{"email": {"email": "x@y"}}, loose]}])
             self.assertIn("not by named people", cfc.alias_check([app], "c.example"), loose)
-        named = dict(good, policies=[{"name": "p", "decision": "allow", "include": [{"email_list": {"id": "l"}}, {"group": {"id": "g"}}]}])
+        named = dict(good, policies=[{"name": "p", "decision": "allow", "include": [{"email_list": {"id": "l"}}]}])
         self.assertIsNone(cfc.alias_check([named], "c.example"))
+        group = dict(good, policies=[{"name": "p", "decision": "allow", "include": [{"group": {"id": "g"}}]}])
+        self.assertIn("not by named people", cfc.alias_check([group], "c.example"), "a group can hide 'everyone'")
 
     def test_ingress_requires_the_access_token_and_compares_it(self):
         want = cfc.desired_ingress([("a.example", "http://localhost:8000", "aud-a")])

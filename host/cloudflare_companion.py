@@ -29,6 +29,7 @@ Usage:
   cloudflare_companion.py install-token <ssh-host>
       # write the run token of THAT rig's tunnel (chosen by the rig's hostname) to
       # /etc/cloudflared-companion.env (root 0600) and restart cloudflared-companion.
+      # Refuses unless `plan` is clean, so it needs COMPANION_ACCESS_EMAILS too.
       # Never printed. SSH: $COMPANION_USER (default newlevel), password $COMPANION_PASS.
 
 Environment:
@@ -176,8 +177,9 @@ def app_plan(apps, payload):
 # Include selectors that name people. Anything else (everyone, login_method,
 # email_domain, ip, geo, any_valid_service_token ...) lets in people nobody listed,
 # and those logins get an Access token with the same aud, so cloudflared's own
-# check would not stop them either.
-NAMED_SELECTORS = {"email", "email_list", "group"}
+# check would not stop them either. `group` is left out on purpose: a group can
+# itself include everyone, so it fails closed until someone checks it by hand.
+NAMED_SELECTORS = {"email", "email_list"}
 
 
 def alias_check(apps, domain):
