@@ -1,5 +1,6 @@
 mod bitfocus;
 mod companion;
+mod guard;
 mod safety;
 mod static_files;
 mod update;
