@@ -89,6 +89,9 @@ jobs:
       - name: ensure-timesync.sh tests
         run: python3 host/ensure_timesync_test.py
 
+      - name: ensure-companion-proxy.sh tests
+        run: python3 host/ensure_companion_proxy_test.py
+
       - name: cloudflare_companion.py tests
         run: python3 host/cloudflare_companion_test.py
 
