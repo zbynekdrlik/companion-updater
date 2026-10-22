@@ -224,6 +224,7 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(cfc.named([{"email": {"email": "x@y"}}, {"email": {"email": "X@y"}}]), "1 e-mail address", "one address in two rules")
         self.assertEqual(cfc.named([{"email": {"email": "x@y"}}, {"email": {"email": "z@y"}}, {"email_list": {"id": "l"}}]), "2 e-mail addresses and 1 e-mail list")
         self.assertEqual(cfc.named([{"email_list": {"id": "l"}}, {"email_list": {"id": "m"}}]), "0 e-mail addresses and 2 e-mail lists")
+        self.assertEqual(cfc.named([{"email_list": {"id": "l"}}, {"email_list": {"id": "l"}}]), "0 e-mail addresses and 1 e-mail list", "one list in two rules")
 
     def test_covers_main_domain_and_extra_destinations(self):
         app = {"domain": "a.example", "self_hosted_domains": ["a.example", "b.example"],
@@ -435,6 +436,11 @@ class RunAgainstTheFoundState(unittest.TestCase):
         lines = []
         self.assertEqual(cfc.run(cf, apply=False, out=lines.append) > 0, True)
         self.assertIn("note    alias companion-pp.newlevel.media: Access app 'newlevel' does not use 'basic', so it may let in other people", lines)
+        cf.apps[0]["policies"] = [copy.deepcopy(cf.policies[0]), copy.deepcopy(cf.policies[-1])]
+        lines = []
+        cfc.run(cf, apply=False, out=lines.append)
+        self.assertIn("note    alias companion-pp.newlevel.media: Access app 'newlevel' uses 'basic' plus 1 other policy, so it may let in other people", lines)
+        self.assertFalse([line for line in lines if "lets in the same people" in line])
 
     def test_plan_names_basic_and_counts_its_people_without_their_e_mails(self):
         cf = FakeCloudflare()
