@@ -214,8 +214,8 @@ def access_policy(policies):
     """The owner's reusable policy ACCESS_POLICY, checked like the aliases' policies; else CloudflareError.
 
     It must exist exactly once (with two, which one the apps get is a guess), be
-    an allow, and name people only. require/exclude rules are not read by this
-    check, so any of them stops the run until someone has looked at them.
+    an allow, and include named people only. require (AND) and exclude (NOT) can
+    only narrow who gets in, so they are left to the owner.
     """
     mine = [p for p in policies if p.get("name") == ACCESS_POLICY]
     what = f"Access policy '{ACCESS_POLICY}' (the owner's; the managed apps use it)"
@@ -231,9 +231,6 @@ def access_policy(policies):
     loose = loose_selectors(pol["include"])
     if loose:
         raise CloudflareError(f"{what} lets in by {loose}, not by named people")
-    for key in ("require", "exclude"):
-        if pol.get(key):
-            raise CloudflareError(f"{what} has {key} rules; this check only vouches for a plain list of named people, so look at them first")
     return pol
 
 
