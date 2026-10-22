@@ -115,10 +115,10 @@ Repository:
 
 Every URL is behind Cloudflare Access with a one-time PIN by e-mail, and every one lets in the same people: the owner's reusable policy "basic" (the people he named, by e-mail).
 
-- **companion-snv, companion-update-snv, companion-update-pp:** Access apps managed by `host/cloudflare_companion.py`, with "basic" and a 30-day session like the other newlevel apps. The tool checks that "basic" names people only; it never changes it.
+- **companion-snv, companion-update-snv, companion-update-pp:** Access apps managed by `host/cloudflare_companion.py`, with "basic". The tool checks that "basic" names people only; it never changes it.
 - **companion-pp and the old `companion.newlevel.media`:** the owner's own Access app "newlevel", also with "basic". The tool only checks this app; it never changes it.
 
-One Cloudflare login (team newlevelchurch, 30-day session) opens every app whose policy allows that person. A browser logged in as someone not in an app's policy is asked to log in again. The PIN page says it e-mailed a code even to an address that is not allowed, but sends nothing.
+One Cloudflare login (team newlevelchurch, 30-day session) opens every app whose policy allows that person; when an app's own shorter session ends ("basic" sets 24h), the browser is sent through that login again without a PIN. A browser logged in as someone not in an app's policy is asked to log in again. The PIN page says it e-mailed a code even to an address that is not allowed, but sends nothing.
 
 cloudflared on the rig also rejects any request without a valid Access token for that hostname's app.
 

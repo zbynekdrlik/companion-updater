@@ -4,11 +4,10 @@
 Desired state:
   - an Access app per managed hostname with the owner's reusable policy "basic"
     (the people he named, by e-mail; his own app "newlevel" uses it too), through
-    the account's one-time-PIN login, 730h session like the owner's other apps.
+    the account's one-time-PIN login, 730h app session like the owner's other
+    apps (a session set on "basic" itself overrides it; plan notes that).
     "basic" is only CHECKED (it must exist once, allow, and name people only),
-    never changed;
-  - no Access policy "Companion owner (OTP email) · claude" any more: this tool
-    used to create it; it is deleted once the managed apps no longer use it;
+    never changed, and the tool never deletes any policy;
   - a notification e-mailing COMPANION_ALERT_EMAILS on every health change of
     either companion tunnel, so an outage is never again found only by chance (the
     tunnels sat dead for weeks after the presenter install replaced the rig's
@@ -91,10 +90,6 @@ CHECKED_ALIASES = ["companion.newlevel.media", "companion-pp.newlevel.media"]
 # e-mail. His app "newlevel" uses it, and so do the managed apps (owner 2026-10-22),
 # so one login opens every Companion URL. Only checked, never changed.
 ACCESS_POLICY = "basic"
-# The policy this tool used to create for the managed apps (one e-mail only, which
-# refused the other people in "basic"). Deleted once no managed app uses it; no
-# other policy is ever deleted.
-OLD_POLICY = "Companion owner (OTP email) · claude"
 # Owner 2026-10-21: 30 days like the other newlevel apps. A device logged in to any
 # newlevel app gets in through the organisation's shared login without another PIN.
 SESSION_DURATION = "730h"
@@ -192,6 +187,22 @@ def loose_selectors(include):
     return sorted({k for r in include or [] for k in r} - NAMED_SELECTORS)
 
 
+def policy_problem(policy):
+    """None when an Access policy is an allow that includes named people only, else what is wrong.
+
+    require (AND) and exclude (NOT) can only narrow who gets in, so they are left
+    to the owner.
+    """
+    if policy.get("decision") != "allow":
+        return f"is a {policy.get('decision')}, not an allow"
+    if not policy.get("include"):
+        return "names nobody"
+    loose = loose_selectors(policy["include"])
+    if loose:
+        return f"lets in by {loose}, not by named people"
+    return None
+
+
 def alias_check(apps, domain):
     """None when `domain` is protected by an Access app that only lets named people in, else the problem."""
     mine = [a for a in apps if covers(a, domain)]
@@ -202,20 +213,17 @@ def alias_check(apps, domain):
         if not policies:
             return f"{domain}: Access app '{app.get('name')}' has no policy"
         for p in policies:
-            if p.get("decision") != "allow":
-                return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' is a {p.get('decision')}, not an allow"
-            loose = loose_selectors(p.get("include"))
-            if loose:
-                return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' lets in by {loose}, not by named people"
+            problem = policy_problem(p)
+            if problem:
+                return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' {problem}"
     return None
 
 
 def access_policy(policies):
     """The owner's reusable policy ACCESS_POLICY, checked like the aliases' policies; else CloudflareError.
 
-    It must exist exactly once (with two, which one the apps get is a guess), be
-    an allow, and include named people only. require (AND) and exclude (NOT) can
-    only narrow who gets in, so they are left to the owner.
+    It must exist exactly once (with two, which one the apps get is a guess) and
+    pass policy_problem, like every policy of the owner's own app.
     """
     mine = [p for p in policies if p.get("name") == ACCESS_POLICY]
     what = f"Access policy '{ACCESS_POLICY}' (the owner's; the managed apps use it)"
@@ -224,21 +232,19 @@ def access_policy(policies):
     if len(mine) > 1:
         raise CloudflareError(f"{len(mine)} reusable policies are named '{ACCESS_POLICY}'; not guessing which one the managed apps get")
     pol = mine[0]
-    if pol.get("decision") != "allow":
-        raise CloudflareError(f"{what} is a {pol.get('decision')}, not an allow")
-    if not pol.get("include"):
-        raise CloudflareError(f"{what} names nobody")
-    loose = loose_selectors(pol["include"])
-    if loose:
-        raise CloudflareError(f"{what} lets in by {loose}, not by named people")
+    problem = policy_problem(pol)
+    if problem:
+        raise CloudflareError(f"{what} {problem}")
     return pol
 
 
 def named(include):
-    """How many people an include list names, without the e-mails: '3 people', '1 person and 1 e-mail list'."""
-    people = sum(1 for r in include if "email" in r)
+    """What an include list names, without the e-mails: '3 e-mail addresses', '1 e-mail address and 1 e-mail list'.
+
+    An address in two rules counts once; a list counts as one, whatever it holds."""
+    addresses = len({(r["email"].get("email") or "").lower() for r in include if "email" in r})
     lists = sum(1 for r in include if "email_list" in r)
-    text = f"{people} {'person' if people == 1 else 'people'}"
+    text = f"{addresses} e-mail address{'' if addresses == 1 else 'es'}"
     return text + (f" and {lists} e-mail list{'' if lists == 1 else 's'}" if lists else "")
 
 
@@ -469,8 +475,8 @@ def gather(cf):
     # All apps: an app can cover a hostname as an extra destination, which a
     # domain= filter does not find (that is how companion-pp turned out to be
     # covered by the owner's app; a POST for it answers 409).
-    st["all_apps"] = list_all(cf, f"/accounts/{acc}/access/apps")
-    st["apps"] = {d: [a for a in st["all_apps"] if covers(a, d)] for d in list(MANAGED_APPS) + CHECKED_ALIASES}
+    all_apps = list_all(cf, f"/accounts/{acc}/access/apps")
+    st["apps"] = {d: [a for a in all_apps if covers(a, d)] for d in list(MANAGED_APPS) + CHECKED_ALIASES}
     st["alerts"] = cf.call("GET", f"/accounts/{acc}/alerting/v3/policies")
     st["dns"] = {}
     for rules in TUNNELS.values():
@@ -510,17 +516,7 @@ def run(cf, apply, out=print):
         action, app_id, reason = app_plan(st["apps"][domain], payload)
         if action == "conflict":
             raise CloudflareError(f"access {reason}")
-        app_steps.append((domain, app_name, action, app_id, reason))
-    # Our old policy goes once the managed apps are off it. An app this tool does
-    # not manage that still uses it stops the run: deleting it would leave that app
-    # without its policy.
-    managed_ids = {app_id for *_s, app_id, _r in app_steps if app_id}
-    old_ids = [p.get("id") for p in st["policies"] if p.get("name") == OLD_POLICY]
-    for old_id in old_ids:
-        users = [a.get("name") for a in st["all_apps"]
-                 if a.get("id") not in managed_ids and old_id in [p.get("id") for p in a.get("policies") or []]]
-        if users:
-            raise CloudflareError(f"Access policy '{OLD_POLICY}' is still used by {users}, which this tool does not manage; not deleting it")
+        app_steps.append((domain, payload, action, app_id, reason))
 
     changes = 0
     verb = "set  " if apply else "would"
@@ -535,12 +531,22 @@ def run(cf, apply, out=print):
 
     # 2. Access first: a hostname is never routed before its app exists.
     note("ok", f"policy '{ACCESS_POLICY}' (the owner's, reusable): allow, names {named(basic['include'])}; checked, never changed")
+    # A policy-level session overrides the app's. The app session ending only
+    # means a redirect: the team login re-issues it without a PIN.
+    if basic.get("session_duration") and basic["session_duration"] != SESSION_DURATION:
+        out(f"note    policy '{ACCESS_POLICY}' sets a {basic['session_duration']} session, which overrides the apps' {SESSION_DURATION}; "
+            "the team login renews it without a PIN until that login itself expires")
+    for domain in CHECKED_ALIASES:
+        for app in (a for a in st["apps"][domain] if covers(a, domain)):
+            if basic["id"] in [p.get("id") for p in app.get("policies") or []]:
+                out(f"ok      alias {domain}: Access app '{app.get('name')}' uses '{ACCESS_POLICY}' too, so it lets in the same people")
+            else:
+                out(f"note    alias {domain}: Access app '{app.get('name')}' does not use '{ACCESS_POLICY}', so it may let in other people")
     auds = {}
     for domain in CHECKED_ALIASES:
         auds[domain] = next((a.get("aud") for a in st["apps"][domain] if covers(a, domain)), None)
-    for domain, app_name, action, app_id, reason in app_steps:
+    for domain, payload, action, app_id, reason in app_steps:
         note(action, f"access {reason}")
-        payload = app_payload(domain, app_name, st["idp"], basic["id"])
         found = next((a for a in st["apps"][domain] if covers(a, domain)), {})
         auds[domain] = found.get("aud")
         if apply and action == "create":
@@ -553,11 +559,6 @@ def run(cf, apply, out=print):
             # Never route a host with a placeholder aud: cloudflared would reject
             # every request, and the next plan would not even see why.
             raise CloudflareError(f"no Access aud for {', '.join(missing)} after the app writes; nothing was routed")
-    # The apps are written: nothing we manage uses the old policy any more.
-    for old_id in old_ids:
-        note("delete", f"delete policy '{OLD_POLICY}': the managed apps use '{ACCESS_POLICY}' now")
-        if apply:
-            cf.call("DELETE", f"/accounts/{acc}/access/policies/{old_id}")
 
     # 3. the health notification.
     alert = alert_payload([t["id"] for t in st["tunnels"].values()], emails)
