@@ -24,8 +24,19 @@ cfc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cfc)
 
 SNV, PP = "tunnel-snv-0000", "tunnel-pp-0000"
-OWNER = "owner@example.com"
-os.environ["COMPANION_ACCESS_EMAILS"] = OWNER
+ALERT = "alert@example.com"
+ENV = mock.patch.dict(os.environ, {"COMPANION_ALERT_EMAILS": ALERT})
+# The policy this tool created on 2026-10-21, before the apps moved to "basic".
+OLD = {"id": "pol-old", "name": cfc.OLD_POLICY, "decision": "allow",
+       "include": [{"email": {"email": "owner@example.com"}}], "exclude": [], "require": []}
+
+
+def setUpModule():
+    ENV.start()
+
+
+def tearDownModule():
+    ENV.stop()
 
 
 def run_value(tunnel_id):
@@ -100,18 +111,13 @@ class FakeCloudflare:
                 return run_value(tid)
         if base == "/accounts/acc1/access/identity_providers":
             return [{"id": "idp-otp", "type": "onetimepin"}]
-        if base == "/accounts/acc1/access/policies":
-            if method == "POST":
-                new = dict(body, id=f"pol{len(self.policies) + 1}")
-                self.policies.append(new)
-                return new
+        if base == "/accounts/acc1/access/policies" and method == "GET":
             return self.page_of(self.policies, params)
-        if base.startswith("/accounts/acc1/access/policies/") and method == "PUT":
+        if base.startswith("/accounts/acc1/access/policies/") and method == "DELETE":
             pid = base.rsplit("/", 1)[1]
-            for i, p in enumerate(self.policies):
-                if p["id"] == pid:
-                    self.policies[i] = dict(body, id=pid)
-            return {}
+            assert any(p["id"] == pid for p in self.policies), f"no policy {pid}"
+            self.policies = [p for p in self.policies if p["id"] != pid]
+            return {"id": pid}
         if base == "/accounts/acc1/access/apps":
             if method == "POST" and any(cfc.covers(a, body["domain"]) for a in self.apps):
                 raise cfc.CloudflareError("HTTP 409: destination belongs to another application")
@@ -157,25 +163,66 @@ def apply_and_converge(test, cf):
     test.assertEqual(cfc.run(cf, apply=False, out=quiet), 0, "a second plan must be clean")
 
 
-class PureFunctions(unittest.TestCase):
-    def test_owner_emails_come_from_the_environment(self):
-        saved = os.environ.pop("COMPANION_ACCESS_EMAILS")
-        try:
-            with self.assertRaises(cfc.CloudflareError):
-                cfc.owner_emails()
-            os.environ["COMPANION_ACCESS_EMAILS"] = " b@x.y, a@x.y ,"
-            self.assertEqual(cfc.owner_emails(), ["a@x.y", "b@x.y"])
-        finally:
-            os.environ["COMPANION_ACCESS_EMAILS"] = saved
+def managed_policy_ids(cf):
+    return {a["domain"]: [p["id"] for p in a["policies"]] for a in cf.apps if a["domain"] in cfc.MANAGED_APPS}
 
-    def test_policy_plan_compares_include_exclude_require(self):
-        want = cfc.desired_policy([OWNER])
-        self.assertEqual(cfc.policy_plan([], want)[0], "create")
-        self.assertEqual(cfc.policy_plan([dict(want, id="p")], want)[:2], ("ok", "p"))
-        self.assertEqual(cfc.policy_plan([dict(want, id="p", decision="bypass")], want)[0], "update")
-        extra = dict(want, id="p", include=want["include"] + [{"everyone": {}}])
-        self.assertEqual(cfc.policy_plan([extra], want)[0], "update")
-        self.assertEqual(cfc.policy_plan([dict(want, id="p", exclude=[{"ip": {"ip": "1.2.3.4/32"}}])], want)[0], "update")
+
+def on_the_old_policy(test):
+    """The state after the first apply of 2026-10-21: the managed apps on our own policy."""
+    cf = FakeCloudflare()
+    apply_and_converge(test, cf)
+    cf.policies.append(copy.deepcopy(OLD))
+    for a in cf.apps:
+        if a["domain"] in cfc.MANAGED_APPS:
+            a["policies"] = [{"id": OLD["id"], "precedence": 1}]
+    cf.calls.clear()
+    return cf
+
+
+class PureFunctions(unittest.TestCase):
+    def test_alert_emails_come_from_COMPANION_ALERT_EMAILS_only(self):
+        with mock.patch.dict(os.environ, {"COMPANION_ALERT_EMAILS": " b@x.y, a@x.y ,"}):
+            self.assertEqual(cfc.alert_emails(), ["a@x.y", "b@x.y"])
+        for value in (None, "", " , "):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {"COMPANION_ACCESS_EMAILS": "a@x.y"}):
+                del os.environ["COMPANION_ALERT_EMAILS"]
+                if value is not None:
+                    os.environ["COMPANION_ALERT_EMAILS"] = value
+                with self.assertRaises(cfc.CloudflareError) as ctx:
+                    cfc.alert_emails()
+                self.assertIn("set COMPANION_ALERT_EMAILS", str(ctx.exception), "the old variable no longer counts")
+
+    def test_access_policy_is_the_owners_basic_and_names_people_only(self):
+        basic = {"id": "pb", "name": "basic", "decision": "allow", "include": [{"email": {"email": "x@y"}}, {"email_list": {"id": "l"}}]}
+        other = {"id": "po", "name": "basic copy", "decision": "bypass", "include": [{"everyone": {}}]}
+        self.assertIs(cfc.access_policy([other, basic]), basic)
+        for empty in ({"require": [], "exclude": []}, {"require": None, "exclude": None}):
+            self.assertEqual(cfc.access_policy([dict(basic, **empty)])["id"], "pb", empty)
+        bad = {
+            "missing": ([other], "no reusable Access policy 'basic'"),
+            "two named basic": ([basic, dict(basic, id="pb2")], "2 reusable policies are named 'basic'"),
+            "bypass": ([dict(basic, decision="bypass")], "is a bypass, not an allow"),
+            "non_identity": ([dict(basic, decision="non_identity")], "is a non_identity, not an allow"),
+            "no decision": ([dict(basic, decision=None)], "not an allow"),
+            "empty include": ([dict(basic, include=[])], "names nobody"),
+            "no include": ([{k: v for k, v in basic.items() if k != "include"}], "names nobody"),
+            "everyone": ([dict(basic, include=basic["include"] + [{"everyone": {}}])], "lets in by ['everyone']"),
+            "email_domain": ([dict(basic, include=[{"email_domain": {"domain": "gmail.com"}}])], "lets in by ['email_domain']"),
+            "service token": ([dict(basic, include=[{"any_valid_service_token": {}}])], "lets in by ['any_valid_service_token']"),
+            "group": ([dict(basic, include=[{"group": {"id": "g"}}])], "lets in by ['group']"),
+            "require": ([dict(basic, require=[{"everyone": {}}])], "has require rules"),
+            "exclude": ([dict(basic, exclude=[{"ip": {"ip": "0.0.0.0/0"}}])], "has exclude rules"),
+        }
+        for name, (policies, needle) in bad.items():
+            with self.subTest(name):
+                with self.assertRaises(cfc.CloudflareError) as ctx:
+                    cfc.access_policy(policies)
+                self.assertIn(needle, str(ctx.exception))
+
+    def test_named_counts_people_without_their_e_mails(self):
+        self.assertEqual(cfc.named([{"email": {"email": "x@y"}}]), "1 person")
+        self.assertEqual(cfc.named([{"email": {"email": "x@y"}}, {"email": {"email": "z@y"}}, {"email_list": {"id": "l"}}]), "2 people and 1 e-mail list")
+        self.assertEqual(cfc.named([{"email_list": {"id": "l"}}, {"email_list": {"id": "m"}}]), "0 people and 2 e-mail lists")
 
     def test_covers_main_domain_and_extra_destinations(self):
         app = {"domain": "a.example", "self_hosted_domains": ["a.example", "b.example"],
@@ -268,7 +315,7 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(cfc.dns_plan([other_tunnel], "h", "t1", {"t2.cfargotunnel.com"})[0], "update")
 
     def test_alert_has_no_status_filter_so_it_cannot_be_silently_wrong(self):
-        payload = cfc.alert_payload(["t2", "t1"], [OWNER])
+        payload = cfc.alert_payload(["t2", "t1"], [ALERT])
         self.assertEqual(payload["filters"], {"tunnel_id": ["t1", "t2"]})
         self.assertEqual(payload["alert_type"], "tunnel_health_event")
         self.assertEqual(cfc.alert_plan([], payload)[0], "create")
@@ -283,8 +330,8 @@ class RunAgainstTheFoundState(unittest.TestCase):
     def test_plan_writes_nothing(self):
         cf = FakeCloudflare()
         changes = cfc.run(cf, apply=False, out=quiet)
-        # policy, 3 apps, alert, both tunnels' ingress, 3 new DNS records
-        self.assertEqual(changes, 10)
+        # 3 apps, alert, both tunnels' ingress, 3 new DNS records; no policy of ours
+        self.assertEqual(changes, 9)
         self.assertEqual(cf.writes(), [])
 
     def test_apps_and_policies_on_later_pages_are_found(self):
@@ -294,27 +341,110 @@ class RunAgainstTheFoundState(unittest.TestCase):
             cf = FakeCloudflare()
             cf.apps.insert(0, {"id": "a0", "aud": "x", "name": "other", "domain": "other.example", "policies": []})
             cf.policies.insert(0, {"id": "p0", "name": "other", "decision": "allow", "include": []})
+            cf.policies.append(copy.deepcopy(OLD))  # page 3
             apply_and_converge(self, cf)
             self.assertFalse([a for a in cf.apps if a["domain"] == "companion-pp.newlevel.media"],
                              "the owner's app on page 2 must be seen as covering companion-pp")
-            self.assertEqual(len([p for p in cf.policies if p["name"] == cfc.POLICY_NAME]), 1)
+            self.assertEqual(set(map(tuple, managed_policy_ids(cf).values())), {("pol-basic",)}, "'basic' is on page 2")
+            self.assertEqual([p["id"] for p in cf.policies], ["p0", "pol-basic"], "the old policy on page 3 is found and deleted")
         finally:
             cfc.PAGE = saved
 
     def test_apply_writes_access_before_any_routing_and_converges(self):
         cf = FakeCloudflare()
+        cf.policies.append(copy.deepcopy(OLD))
+        seeded_basic = copy.deepcopy(cf.policies[0])
         apply_and_converge(self, cf)
         order = [p for _m, p in cf.writes()]
         first_routing = min(i for i, p in enumerate(order) if "/configurations" in p or "/dns_records" in p)
         last_access = max(i for i, p in enumerate(order) if "/access/" in p)
+        self.assertIn("/accounts/acc1/access/policies/pol-old", order)
         self.assertLess(last_access, first_routing, "a hostname was routed before its Access app existed")
         managed = {a["domain"]: a for a in cf.apps}
         for domain in cfc.MANAGED_APPS:
             self.assertEqual(managed[domain]["session_duration"], "730h")
-            self.assertEqual(len(managed[domain]["policies"]), 1)
-        owner_pol = [p for p in cf.policies if p["name"] == cfc.POLICY_NAME][0]
-        self.assertEqual(owner_pol["include"], [{"email": {"email": OWNER}}])
+            self.assertEqual(managed[domain]["policies"], [{"id": "pol-basic", "precedence": 1}], domain)
+        self.assertEqual(cf.policies, [seeded_basic], "'basic' is kept exactly as it was; only our old policy went")
+        self.assertFalse([w for w in cf.writes() if w[1].startswith("/accounts/acc1/access/policies") and w != ("DELETE", "/accounts/acc1/access/policies/pol-old")],
+                         "no policy is created or changed, and no other one deleted")
         self.assertEqual(managed["companion.newlevel.media"]["name"], "newlevel", "the owner's hand-made app stays as it is")
+
+    def test_apps_on_the_old_policy_move_to_basic_and_then_the_old_policy_goes(self):
+        cf = on_the_old_policy(self)
+        cf.policies.append({"id": "pol-other", "name": "Companion owner (OTP email)", "decision": "allow", "include": [{"email": {"email": "x@example.com"}}]})
+        lines = []
+        self.assertEqual(cfc.run(cf, apply=False, out=lines.append), 4, "3 apps back to 'basic', then the delete")
+        self.assertIn(f"would   delete policy '{cfc.OLD_POLICY}': the managed apps use 'basic' now", lines)
+        self.assertEqual(cf.writes(), [])
+        apply_and_converge(self, cf)
+        writes = cf.writes()
+        app_puts = [i for i, (m, p) in enumerate(writes) if m == "PUT" and "/access/apps/" in p]
+        deletes = [(i, w) for i, w in enumerate(writes) if w[0] == "DELETE"]
+        self.assertEqual(len(app_puts), 3)
+        self.assertEqual([w for _i, w in deletes], [("DELETE", "/accounts/acc1/access/policies/pol-old")], "only our old policy is deleted")
+        self.assertGreater(deletes[0][0], max(app_puts), "deleted only after no managed app uses it")
+        self.assertEqual(set(map(tuple, managed_policy_ids(cf).values())), {("pol-basic",)})
+        self.assertEqual([p["id"] for p in cf.policies], ["pol-basic", "pol-other"])
+
+    def test_the_state_after_the_switch_of_2026_10_22_plans_only_the_delete(self):
+        cf = FakeCloudflare()
+        apply_and_converge(self, cf)
+        cf.policies.append(copy.deepcopy(OLD))
+        cf.calls.clear()
+        lines = []
+        self.assertEqual(cfc.run(cf, apply=False, out=lines.append), 1)
+        self.assertEqual([line for line in lines if not line.startswith("ok")],
+                         [f"would   delete policy '{cfc.OLD_POLICY}': the managed apps use 'basic' now"])
+        apply_and_converge(self, cf)
+        self.assertEqual(cf.writes(), [("DELETE", "/accounts/acc1/access/policies/pol-old")])
+
+    def test_an_old_policy_another_app_still_uses_stops_before_any_write(self):
+        cf = on_the_old_policy(self)
+        cf.apps.append({"id": "a9", "aud": "x", "name": "other app", "domain": "other.example", "policies": [{"id": "pol-old"}]})
+        self.assert_stops_without_writing(cf, "still used by ['other app']")
+
+    def test_a_basic_that_is_not_a_plain_allow_for_named_people_stops_before_any_write(self):
+        def basic(cf):
+            return [p for p in cf.policies if p["name"] == "basic"][0]
+
+        cases = {
+            "missing": (lambda cf: cf.policies.clear(), "no reusable Access policy 'basic'"),
+            "two named basic": (lambda cf: cf.policies.append(dict(copy.deepcopy(basic(cf)), id="pol-basic-2")), "2 reusable policies are named 'basic'"),
+            "not an allow": (lambda cf: basic(cf).update(decision="bypass"), "is a bypass, not an allow"),
+            "everyone": (lambda cf: basic(cf)["include"].append({"everyone": {}}), "lets in by ['everyone']"),
+            "email_domain": (lambda cf: basic(cf)["include"].append({"email_domain": {"domain": "example.com"}}), "lets in by ['email_domain']"),
+            "service token": (lambda cf: basic(cf)["include"].append({"any_valid_service_token": {}}), "lets in by ['any_valid_service_token']"),
+            "require": (lambda cf: basic(cf).update(require=[{"everyone": {}}]), "has require rules"),
+            "exclude": (lambda cf: basic(cf).update(exclude=[{"email": {"email": "x@example.com"}}]), "has exclude rules"),
+        }
+        for name, (break_it, needle) in cases.items():
+            with self.subTest(name):
+                cf = FakeCloudflare()
+                cf.policies.append(copy.deepcopy(OLD))
+                break_it(cf)
+                self.assert_stops_without_writing(cf, needle)
+
+    def test_plan_names_basic_and_counts_its_people_without_their_e_mails(self):
+        cf = FakeCloudflare()
+        cf.policies[0]["include"] = [{"email": {"email": f"p{i}@example.com"}} for i in range(3)] + [{"email_list": {"id": "list1"}}]
+        lines = []
+        cfc.run(cf, apply=False, out=lines.append)
+        self.assertIn("ok      policy 'basic' (the owner's, reusable): allow, names 3 people and 1 e-mail list; checked, never changed", lines)
+        self.assertFalse([line for line in lines if "@" in line], "no e-mail address in the output")
+
+    def test_the_alert_goes_to_COMPANION_ALERT_EMAILS_and_without_it_nothing_runs(self):
+        with mock.patch.dict(os.environ, {"COMPANION_ALERT_EMAILS": "b@example.com,a@example.com"}):
+            cf = FakeCloudflare()
+            apply_and_converge(self, cf)
+        alert = [a for a in cf.alerts if a["name"] == cfc.ALERT_NAME][0]
+        self.assertEqual(alert["mechanisms"], {"email": [{"id": "a@example.com"}, {"id": "b@example.com"}]})
+        with mock.patch.dict(os.environ, {"COMPANION_ACCESS_EMAILS": ALERT}):
+            del os.environ["COMPANION_ALERT_EMAILS"]
+            cf = FakeCloudflare()
+            with self.assertRaises(cfc.CloudflareError) as ctx:
+                cfc.run(cf, apply=True, out=quiet)
+        self.assertIn("COMPANION_ALERT_EMAILS", str(ctx.exception))
+        self.assertEqual(cf.calls, [])
 
     def test_apply_routes_each_host_to_its_service_with_access_required(self):
         cf = FakeCloudflare()
@@ -340,7 +470,7 @@ class RunAgainstTheFoundState(unittest.TestCase):
         self.assertEqual(names["companion-update-pp.newlevel.media"]["content"], f"{PP}.cfargotunnel.com")
         alert = [a for a in cf.alerts if a["name"] == cfc.ALERT_NAME][0]
         self.assertEqual(alert["filters"], {"tunnel_id": sorted([SNV, PP])})
-        self.assertEqual(alert["mechanisms"], {"email": [{"id": OWNER}]})
+        self.assertEqual(alert["mechanisms"], {"email": [{"id": ALERT}]})
 
     def test_drift_is_repaired_through_the_update_paths(self):
         cf = FakeCloudflare()
@@ -352,14 +482,11 @@ class RunAgainstTheFoundState(unittest.TestCase):
             if a["domain"] == "companion-update-pp.newlevel.media":
                 a["session_duration"] = "24h"
                 a["policies"].append({"id": "bypass-everyone"})
-        for p in cf.policies:
-            if p["name"] == cfc.POLICY_NAME:
-                p["include"].append({"everyone": {}})
         for a in cf.alerts:
             if a["name"] == cfc.ALERT_NAME:
                 a["enabled"] = False
         cf.calls.clear()
-        self.assertEqual(cfc.run(cf, apply=False, out=quiet), 4)
+        self.assertEqual(cfc.run(cf, apply=False, out=quiet), 3)
         apply_and_converge(self, cf)
         for drift in (
             lambda: [a.update(filters={"tunnel_id": [SNV]}) for a in cf.alerts if a["name"] == cfc.ALERT_NAME],
@@ -369,7 +496,7 @@ class RunAgainstTheFoundState(unittest.TestCase):
             lambda: [a.update(allowed_idps=[]) for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
             lambda: [a.update(auto_redirect_to_identity=False) for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
             lambda: [a.update(same_site_cookie_attribute=None) for a in cf.apps if a["domain"] == "companion-snv.newlevel.media"],
-            lambda: [p.update(require=[{"geo": {"country_code": "SK"}}]) for p in cf.policies if p["name"] == cfc.POLICY_NAME],
+            lambda: [a.update(policies=[{"id": "pol-other"}]) for a in cf.apps if a["domain"] == "companion-update-snv.newlevel.media"],
             lambda: [r.update(service="http://localhost:9999") for r in cf.tunnels[PP]["config"]["ingress"][:1]],
         ):
             drift()
@@ -379,7 +506,7 @@ class RunAgainstTheFoundState(unittest.TestCase):
         writes = cf.writes()
         self.assertIn("PATCH", [m for m, _p in writes])
         self.assertTrue(any(m == "PUT" and "/access/apps/" in p for m, p in writes))
-        self.assertTrue(any(m == "PUT" and "/access/policies/" in p for m, p in writes))
+        self.assertFalse([p for _m, p in writes if "/access/policies" in p], "the owner's policy is never written")
         self.assertTrue(any(m == "PUT" and "/alerting/v3/policies/" in p for m, p in writes))
         self.assertFalse(any(m == "POST" for m, _p in writes), "drift must update, never duplicate")
 
@@ -558,7 +685,9 @@ class Proc:
 
 class InstallToken(unittest.TestCase):
     def setUp(self):
-        os.environ["COMPANION_PASS"] = "pw"
+        env = mock.patch.dict(os.environ, {"COMPANION_PASS": "pw"})
+        env.start()
+        self.addCleanup(env.stop)
         self.calls = []
 
     def runner_for(self, rig, fail_on=None):
@@ -588,12 +717,18 @@ class InstallToken(unittest.TestCase):
         self.assertIn("run `apply` first", str(ctx.exception))
         self.assertEqual(self.stdin_write(), [], "no token may be installed before Access is in place")
 
+    def test_needs_the_alert_e_mails_because_it_refuses_unless_plan_is_clean(self):
+        cf = self.converged()
+        with mock.patch.dict(os.environ):
+            del os.environ["COMPANION_ALERT_EMAILS"]
+            with self.assertRaises(cfc.CloudflareError) as ctx:
+                cfc.install_token(cf, "companion-pp.lan", runner=self.runner_for("linux-pp"))
+        self.assertIn("COMPANION_ALERT_EMAILS", str(ctx.exception))
+        self.assertEqual(self.stdin_write(), [])
+
     def test_user_override_restart_recheck_and_missing_unit(self):
-        os.environ["COMPANION_USER"] = "admin"
-        try:
+        with mock.patch.dict(os.environ, {"COMPANION_USER": "admin"}):
             cfc.install_token(self.converged(), "companion-pp.lan", runner=self.runner_for("linux-pp"))
-        finally:
-            del os.environ["COMPANION_USER"]
         self.assertTrue(all("admin@companion-pp.lan" in c[0] for c in self.calls))
         start = [c for c in self.calls if "systemctl" in c[0][-1]][0][0][-1]
         self.assertIn("sudo systemctl enable cloudflared-companion && sudo systemctl restart cloudflared-companion && sleep 5 && systemctl is-active cloudflared-companion", start)
