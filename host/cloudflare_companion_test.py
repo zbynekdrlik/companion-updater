@@ -269,6 +269,16 @@ class PureFunctions(unittest.TestCase):
         self.assertEqual(p["session_duration"], "730h")
         self.assertEqual(p["policies"], [{"id": "pol", "precedence": 1}])
 
+    def test_only_named_people_count_as_named(self):
+        self.assertEqual(cfc.NAMED_SELECTORS, {"email", "email_list"})
+        selectors = ["everyone", "email_domain", "ip", "ip_list", "geo", "country_code", "group", "service_token",
+                     "any_valid_service_token", "login_method", "auth_method", "common_name", "certificate", "device_posture",
+                     "external_evaluation", "saml", "gsuite", "github-organization", "azureAD", "okta", "auth_context"]
+        for sel in selectors:
+            with self.subTest(sel):
+                self.assertEqual(cfc.loose_selectors([{"email": {"email": "x@y"}}, {sel: {}}]), [sel])
+                self.assertIn("not by named people", cfc.policy_problem({"decision": "allow", "include": [{sel: {}}]}))
+
     def test_alias_check(self):
         good = {"name": "n", "domain": "c.example", "policies": [{"name": "basic", "decision": "allow", "include": [{"email": {"email": "x@y"}}]}]}
         self.assertIsNone(cfc.alias_check([good], "c.example"))
