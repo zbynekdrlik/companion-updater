@@ -196,8 +196,10 @@ class PureFunctions(unittest.TestCase):
         basic = {"id": "pb", "name": "basic", "decision": "allow", "include": [{"email": {"email": "x@y"}}, {"email_list": {"id": "l"}}]}
         other = {"id": "po", "name": "basic copy", "decision": "bypass", "include": [{"everyone": {}}]}
         self.assertIs(cfc.access_policy([other, basic]), basic)
-        for empty in ({"require": [], "exclude": []}, {"require": None, "exclude": None}):
-            self.assertEqual(cfc.access_policy([dict(basic, **empty)])["id"], "pb", empty)
+        # require (AND) and exclude (NOT) can only narrow who gets in, so they are fine.
+        for extra in ({"require": [], "exclude": []}, {"require": None, "exclude": None},
+                      {"require": [{"geo": {"country_code": "SK"}}], "exclude": [{"email": {"email": "x@y"}}]}):
+            self.assertEqual(cfc.access_policy([dict(basic, **extra)])["id"], "pb", extra)
         bad = {
             "missing": ([other], "no reusable Access policy 'basic'"),
             "two named basic": ([basic, dict(basic, id="pb2")], "2 reusable policies are named 'basic'"),
@@ -210,8 +212,6 @@ class PureFunctions(unittest.TestCase):
             "email_domain": ([dict(basic, include=[{"email_domain": {"domain": "gmail.com"}}])], "lets in by ['email_domain']"),
             "service token": ([dict(basic, include=[{"any_valid_service_token": {}}])], "lets in by ['any_valid_service_token']"),
             "group": ([dict(basic, include=[{"group": {"id": "g"}}])], "lets in by ['group']"),
-            "require": ([dict(basic, require=[{"everyone": {}}])], "has require rules"),
-            "exclude": ([dict(basic, exclude=[{"ip": {"ip": "0.0.0.0/0"}}])], "has exclude rules"),
         }
         for name, (policies, needle) in bad.items():
             with self.subTest(name):
@@ -414,8 +414,6 @@ class RunAgainstTheFoundState(unittest.TestCase):
             "everyone": (lambda cf: basic(cf)["include"].append({"everyone": {}}), "lets in by ['everyone']"),
             "email_domain": (lambda cf: basic(cf)["include"].append({"email_domain": {"domain": "example.com"}}), "lets in by ['email_domain']"),
             "service token": (lambda cf: basic(cf)["include"].append({"any_valid_service_token": {}}), "lets in by ['any_valid_service_token']"),
-            "require": (lambda cf: basic(cf).update(require=[{"everyone": {}}]), "has require rules"),
-            "exclude": (lambda cf: basic(cf).update(exclude=[{"email": {"email": "x@example.com"}}]), "has exclude rules"),
         }
         for name, (break_it, needle) in cases.items():
             with self.subTest(name):
@@ -423,6 +421,13 @@ class RunAgainstTheFoundState(unittest.TestCase):
                 cf.policies.append(copy.deepcopy(OLD))
                 break_it(cf)
                 self.assert_stops_without_writing(cf, needle)
+
+    def test_a_basic_the_owner_narrowed_with_require_or_exclude_still_converges(self):
+        cf = FakeCloudflare()
+        cf.policies[0].update(require=[{"geo": {"country_code": "SK"}}], exclude=[{"email": {"email": "gone@example.com"}}])
+        cfc.run(cf, apply=True, out=quiet)
+        self.assertEqual(cfc.run(cf, apply=False, out=quiet), 0)
+        self.assertFalse([p for _m, p in cf.writes() if "pol-basic" in p], "basic is never written")
 
     def test_plan_names_basic_and_counts_its_people_without_their_e_mails(self):
         cf = FakeCloudflare()
