@@ -2,12 +2,15 @@
 """Cloudflare side of the Companion web UIs (companion-updater#26).
 
 Desired state:
-  - an Access policy (reusable, allow) for the owner's e-mail, through the
-    account's one-time-PIN login;
-  - an Access app per managed hostname with that policy, 730h session like the
-    owner's other apps;
-  - a notification e-mailing the owner on every health change of either
-    companion tunnel, so an outage is never again found only by chance (the
+  - an Access app per managed hostname with the owner's reusable policy "basic"
+    (the people he named, by e-mail; his own app "newlevel" uses it too), through
+    the account's one-time-PIN login, 730h session like the owner's other apps.
+    "basic" is only CHECKED (it must exist once, allow, and name people only),
+    never changed;
+  - no Access policy "Companion owner (OTP email) · claude" any more: this tool
+    used to create it; it is deleted once the managed apps no longer use it;
+  - a notification e-mailing COMPANION_ALERT_EMAILS on every health change of
+    either companion tunnel, so an outage is never again found only by chance (the
     tunnels sat dead for weeks after the presenter install replaced the rig's
     cloudflared.service);
   - tunnel ingress: each hostname -> its service on the rig (Companion UI :8000,
@@ -22,6 +25,10 @@ them, with allow policies naming people), never changed.
 Writes happen in that order, after every check has passed, so a hostname is
 never routed to the rig before its Access app exists.
 
+A browser logged in as someone the app's policy does not name is asked to log
+in again; the PIN page then says it e-mailed a code even to an address the
+policy does not allow, and sends nothing.
+
 Usage:
   cloudflare_companion.py plan       # what would change; exit 0 = nothing, 3 = changes pending
   cloudflare_companion.py apply      # make the changes, then re-plan (must be clean)
@@ -32,14 +39,16 @@ Usage:
   cloudflare_companion.py install-token <ssh-host>
       # write the run token of THAT rig's tunnel (chosen by the rig's hostname) to
       # /etc/cloudflared-companion.env (root 0600) and restart cloudflared-companion.
-      # Refuses unless `plan` is clean, so it needs COMPANION_ACCESS_EMAILS too.
+      # Refuses unless `plan` is clean, so it needs COMPANION_ALERT_EMAILS too.
       # Never printed. SSH: $COMPANION_USER (default newlevel), password $COMPANION_PASS.
 
 Environment:
   CF_TOKEN_FILE            API token file (default: the cloudflare-newlevel-full key file
                            in ~/.secrets); never printed
-  COMPANION_ACCESS_EMAILS  comma-separated e-mails allowed in and alerted (the owner's;
-                           kept out of this public repo)
+  COMPANION_ALERT_EMAILS   comma-separated e-mails the tunnel outage alert goes to (kept
+                           out of this public repo); plan, apply and install-token need it,
+                           because the alert is part of the desired state. Who may log in
+                           is the policy "basic", not this.
 """
 import base64
 import json
@@ -76,10 +85,16 @@ MANAGED_APPS = {
     "companion-update-pp.newlevel.media": "Companion updater pp · claude",
 }
 # Hostnames the owner's own hand-made Access app "newlevel" covers (its domain and
-# its extra destination; policy "basic": the owner plus two people he chose).
-# Only checked, never changed.
+# its extra destination; policy "basic"). Only checked, never changed.
 CHECKED_ALIASES = ["companion.newlevel.media", "companion-pp.newlevel.media"]
-POLICY_NAME = "Companion owner (OTP email) · claude"
+# The owner's reusable allow policy, his "mail security": the people he named, by
+# e-mail. His app "newlevel" uses it, and so do the managed apps (owner 2026-10-22),
+# so one login opens every Companion URL. Only checked, never changed.
+ACCESS_POLICY = "basic"
+# The policy this tool used to create for the managed apps (one e-mail only, which
+# refused the other people in "basic"). Deleted once no managed app uses it; no
+# other policy is ever deleted.
+OLD_POLICY = "Companion owner (OTP email) · claude"
 # Owner 2026-10-21: 30 days like the other newlevel apps. A device logged in to any
 # newlevel app gets in through the organisation's shared login without another PIN.
 SESSION_DURATION = "730h"
@@ -106,44 +121,12 @@ class CloudflareError(Exception):
 # ---------------------------------------------------------------- pure planning
 
 
-def owner_emails():
-    raw = os.environ.get("COMPANION_ACCESS_EMAILS", "")
+def alert_emails():
+    raw = os.environ.get("COMPANION_ALERT_EMAILS", "")
     emails = sorted({e.strip() for e in raw.split(",") if e.strip()})
     if not emails:
-        raise CloudflareError("set COMPANION_ACCESS_EMAILS (the owner's e-mail, comma-separated)")
+        raise CloudflareError("set COMPANION_ALERT_EMAILS (comma-separated e-mails the tunnel outage alert goes to)")
     return emails
-
-
-def _rules(rules):
-    """A comparable form of an Access include/exclude/require list."""
-    return sorted(json.dumps(r, sort_keys=True) for r in (rules or []))
-
-
-def desired_policy(emails):
-    return {
-        "name": POLICY_NAME,
-        "decision": "allow",
-        "include": [{"email": {"email": e}} for e in emails],
-        "exclude": [],
-        "require": [],
-    }
-
-
-def policy_plan(policies, desired):
-    """("ok"|"create"|"update", policy_id, reason) for the reusable owner policy."""
-    mine = [p for p in policies if p.get("name") == desired["name"]]
-    if not mine:
-        return ("create", None, f"no Access policy '{desired['name']}'")
-    pol = mine[0]
-    diffs = []
-    if pol.get("decision") != desired["decision"]:
-        diffs.append("decision")
-    for key in ("include", "exclude", "require"):
-        if _rules(pol.get(key)) != _rules(desired[key]):
-            diffs.append(key)
-    if not diffs:
-        return ("ok", pol.get("id"), f"Access policy '{desired['name']}' as wanted")
-    return ("update", pol.get("id"), f"Access policy '{desired['name']}' differs in {', '.join(diffs)}")
 
 
 def app_payload(domain, name, idp_id, policy_id):
@@ -171,9 +154,9 @@ def covers(app, domain):
 def app_plan(apps, payload):
     """("ok"|"create"|"update"|"conflict", app_id, reason) for a managed app.
 
-    The app must carry exactly the owner policy: any extra policy (a bypass, an
-    'everyone') is drift. An app on the domain under another name is somebody
-    else's; it is never overwritten.
+    The app must carry exactly the policy "basic": any other or extra policy
+    (our old one, a bypass, an 'everyone') is drift. An app on the domain under
+    another name is somebody else's; it is never overwritten.
     """
     domain = payload["domain"]
     mine = [a for a in apps if covers(a, domain)]
@@ -204,6 +187,11 @@ def app_plan(apps, payload):
 NAMED_SELECTORS = {"email", "email_list"}
 
 
+def loose_selectors(include):
+    """The selectors in an include list that do not name people."""
+    return sorted({k for r in include or [] for k in r} - NAMED_SELECTORS)
+
+
 def alias_check(apps, domain):
     """None when `domain` is protected by an Access app that only lets named people in, else the problem."""
     mine = [a for a in apps if covers(a, domain)]
@@ -216,10 +204,45 @@ def alias_check(apps, domain):
         for p in policies:
             if p.get("decision") != "allow":
                 return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' is a {p.get('decision')}, not an allow"
-            loose = sorted({k for r in p.get("include") or [] for k in r} - NAMED_SELECTORS)
+            loose = loose_selectors(p.get("include"))
             if loose:
                 return f"{domain}: Access app '{app.get('name')}' policy '{p.get('name')}' lets in by {loose}, not by named people"
     return None
+
+
+def access_policy(policies):
+    """The owner's reusable policy ACCESS_POLICY, checked like the aliases' policies; else CloudflareError.
+
+    It must exist exactly once (with two, which one the apps get is a guess), be
+    an allow, and name people only. require/exclude rules are not read by this
+    check, so any of them stops the run until someone has looked at them.
+    """
+    mine = [p for p in policies if p.get("name") == ACCESS_POLICY]
+    what = f"Access policy '{ACCESS_POLICY}' (the owner's; the managed apps use it)"
+    if not mine:
+        raise CloudflareError(f"no reusable {what}")
+    if len(mine) > 1:
+        raise CloudflareError(f"{len(mine)} reusable policies are named '{ACCESS_POLICY}'; not guessing which one the managed apps get")
+    pol = mine[0]
+    if pol.get("decision") != "allow":
+        raise CloudflareError(f"{what} is a {pol.get('decision')}, not an allow")
+    if not pol.get("include"):
+        raise CloudflareError(f"{what} names nobody")
+    loose = loose_selectors(pol["include"])
+    if loose:
+        raise CloudflareError(f"{what} lets in by {loose}, not by named people")
+    for key in ("require", "exclude"):
+        if pol.get(key):
+            raise CloudflareError(f"{what} has {key} rules; this check only vouches for a plain list of named people, so look at them first")
+    return pol
+
+
+def named(include):
+    """How many people an include list names, without the e-mails: '3 people', '1 person and 1 e-mail list'."""
+    people = sum(1 for r in include if "email" in r)
+    lists = sum(1 for r in include if "email_list" in r)
+    text = f"{people} {'person' if people == 1 else 'people'}"
+    return text + (f" and {lists} e-mail list{'' if lists == 1 else 's'}" if lists else "")
 
 
 def desired_ingress(rules):
@@ -449,8 +472,8 @@ def gather(cf):
     # All apps: an app can cover a hostname as an extra destination, which a
     # domain= filter does not find (that is how companion-pp turned out to be
     # covered by the owner's app; a POST for it answers 409).
-    all_apps = list_all(cf, f"/accounts/{acc}/access/apps")
-    st["apps"] = {d: [a for a in all_apps if covers(a, d)] for d in list(MANAGED_APPS) + CHECKED_ALIASES}
+    st["all_apps"] = list_all(cf, f"/accounts/{acc}/access/apps")
+    st["apps"] = {d: [a for a in st["all_apps"] if covers(a, d)] for d in list(MANAGED_APPS) + CHECKED_ALIASES}
     st["alerts"] = cf.call("GET", f"/accounts/{acc}/alerting/v3/policies")
     st["dns"] = {}
     for rules in TUNNELS.values():
@@ -461,7 +484,7 @@ def gather(cf):
 
 def run(cf, apply, out=print):
     """Plan, and with apply=True make, every change. Returns the number of changes."""
-    emails = owner_emails()
+    emails = alert_emails()
     st = gather(cf)
     acc, zone = st["account"], st["zone"]
 
@@ -483,15 +506,24 @@ def run(cf, apply, out=print):
             if action == "conflict":
                 raise CloudflareError(f"dns {reason}")
             dns_steps.append((name, host, action, rec_id, reason))
-    want_policy = desired_policy(emails)
-    pol_action, pol_id, pol_reason = policy_plan(st["policies"], want_policy)
+    basic = access_policy(st["policies"])
     app_steps = []
     for domain, app_name in MANAGED_APPS.items():
-        payload = app_payload(domain, app_name, st["idp"], pol_id or "<new policy>")
+        payload = app_payload(domain, app_name, st["idp"], basic["id"])
         action, app_id, reason = app_plan(st["apps"][domain], payload)
         if action == "conflict":
             raise CloudflareError(f"access {reason}")
         app_steps.append((domain, app_name, action, app_id, reason))
+    # Our old policy goes once the managed apps are off it. An app this tool does
+    # not manage that still uses it stops the run: deleting it would leave that app
+    # without its policy.
+    managed_ids = {app_id for *_s, app_id, _r in app_steps if app_id}
+    old_ids = [p.get("id") for p in st["policies"] if p.get("name") == OLD_POLICY]
+    for old_id in old_ids:
+        users = [a.get("name") for a in st["all_apps"]
+                 if a.get("id") not in managed_ids and old_id in [p.get("id") for p in a.get("policies") or []]]
+        if users:
+            raise CloudflareError(f"Access policy '{OLD_POLICY}' is still used by {users}, which this tool does not manage; not deleting it")
 
     changes = 0
     verb = "set  " if apply else "would"
@@ -505,17 +537,13 @@ def run(cf, apply, out=print):
             out(f"{verb}   {what}")
 
     # 2. Access first: a hostname is never routed before its app exists.
-    note(pol_action, f"policy {pol_reason}")
-    if apply and pol_action == "create":
-        pol_id = cf.call("POST", f"/accounts/{acc}/access/policies", want_policy)["id"]
-    elif apply and pol_action == "update":
-        cf.call("PUT", f"/accounts/{acc}/access/policies/{pol_id}", want_policy)
+    note("ok", f"policy '{ACCESS_POLICY}' (the owner's, reusable): allow, names {named(basic['include'])}; checked, never changed")
     auds = {}
     for domain in CHECKED_ALIASES:
         auds[domain] = next((a.get("aud") for a in st["apps"][domain] if covers(a, domain)), None)
     for domain, app_name, action, app_id, reason in app_steps:
         note(action, f"access {reason}")
-        payload = app_payload(domain, app_name, st["idp"], pol_id)
+        payload = app_payload(domain, app_name, st["idp"], basic["id"])
         found = next((a for a in st["apps"][domain] if covers(a, domain)), {})
         auds[domain] = found.get("aud")
         if apply and action == "create":
@@ -528,6 +556,11 @@ def run(cf, apply, out=print):
             # Never route a host with a placeholder aud: cloudflared would reject
             # every request, and the next plan would not even see why.
             raise CloudflareError(f"no Access aud for {', '.join(missing)} after the app writes; nothing was routed")
+    # The apps are written: nothing we manage uses the old policy any more.
+    for old_id in old_ids:
+        note("delete", f"delete policy '{OLD_POLICY}': the managed apps use '{ACCESS_POLICY}' now")
+        if apply:
+            cf.call("DELETE", f"/accounts/{acc}/access/policies/{old_id}")
 
     # 3. the health notification.
     alert = alert_payload([t["id"] for t in st["tunnels"].values()], emails)

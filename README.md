@@ -5,7 +5,7 @@ Production setup for [Bitfocus Companion](https://bitfocus.io/companion) with US
 ## Architecture
 
 - **Companion**: Native systemd service via [companion-pi](https://github.com/bitfocus/companion-pi) — direct USB/udev access for reliable Stream Deck hot-plug detection
-- **Cloudflare Tunnel + Access**: `cloudflared-companion.service` publishes the Companion UI and the update dashboard behind Cloudflare Access (owner e-mail, one-time PIN)
+- **Cloudflare Tunnel + Access**: `cloudflared-companion.service` publishes the Companion UI and the update dashboard behind Cloudflare Access (the owner's policy "basic", one-time PIN by e-mail)
 - **Update Dashboard**: Native Rust binary (axum + Leptos/WASM) for checking and applying Companion updates, with a pre/post upgrade safety gate that auto-rolls back on data loss
 - **Off-machine Backups**: Hourly push of the Companion config to a private GitHub repo (`zbynekdrlik/companion-backups`), 30-day history retention
 - **Persistent Data**: Configuration stored at `~companion/.config/companion-nodejs/`
@@ -113,10 +113,12 @@ Repository:
 | https://companion-pp.newlevel.media | companion-pp | Companion UI (:8000) |
 | https://companion-update-pp.newlevel.media | companion-pp | Update dashboard (:8081) |
 
-Every URL is behind Cloudflare Access with a one-time PIN by e-mail:
+Every URL is behind Cloudflare Access with a one-time PIN by e-mail, and every one lets in the same people: the owner's reusable policy "basic" (the people he named, by e-mail).
 
-- **companion-snv, companion-update-snv, companion-update-pp:** Access apps managed by `host/cloudflare_companion.py`. Only the owner's e-mail is allowed, with a 30-day session like the other newlevel apps.
-- **companion-pp and the old `companion.newlevel.media`:** the owner's own Access app "newlevel". Its policy "basic" allows the owner and the two people he chose. The tool only checks this app; it never changes it.
+- **companion-snv, companion-update-snv, companion-update-pp:** Access apps managed by `host/cloudflare_companion.py`, with "basic" and a 30-day session like the other newlevel apps. The tool checks that "basic" names people only; it never changes it.
+- **companion-pp and the old `companion.newlevel.media`:** the owner's own Access app "newlevel", also with "basic". The tool only checks this app; it never changes it.
+
+One Cloudflare login (team newlevelchurch, 30-day session) opens every app whose policy allows that person. A browser logged in as someone not in an app's policy is asked to log in again. The PIN page says it e-mailed a code even to an address that is not allowed, but sends nothing.
 
 cloudflared on the rig also rejects any request without a valid Access token for that hostname's app.
 
@@ -126,12 +128,13 @@ Companion itself has `trustedProxies: loopback` in `/etc/companion/config.yaml`.
 
 ```bash
 # Cloudflare side (Access apps, tunnel ingress, DNS, the tunnel-health e-mail): as code, idempotent
-COMPANION_ACCESS_EMAILS=<owner e-mail> host/cloudflare_companion.py plan    # exit 3 = changes pending
-COMPANION_ACCESS_EMAILS=<owner e-mail> host/cloudflare_companion.py apply
-host/cloudflare_companion.py status                                         # exit 1 = a tunnel is down
+# COMPANION_ALERT_EMAILS = who gets the tunnel outage e-mail (who may log in is "basic")
+COMPANION_ALERT_EMAILS=<alert e-mail> host/cloudflare_companion.py plan    # exit 3 = changes pending
+COMPANION_ALERT_EMAILS=<alert e-mail> host/cloudflare_companion.py apply
+host/cloudflare_companion.py status                                        # exit 1 = a tunnel is down
 
 # The rig's run token (the tunnel is chosen from the rig's hostname; never printed)
-COMPANION_ACCESS_EMAILS=<owner e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
+COMPANION_ALERT_EMAILS=<alert e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
 ```
 
 Then `deploy.sh` installs the unit. It fails if the tunnel token is missing (opt out with `COMPANION_TUNNEL=skip`), if the public URL does not answer with the Access login, or if Companion refuses the web UI connection from the tunnel.
