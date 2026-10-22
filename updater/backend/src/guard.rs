@@ -2,7 +2,8 @@
 //!
 //! The dashboard is published at companion-update-*.newlevel.media behind
 //! Cloudflare Access (companion-updater#26). Access protects against strangers,
-//! not against a request riding the owner's Access cookie: a link on another
+//! not against a request riding the Access cookie of anyone in the owner's
+//! policy "basic": a link on another
 //! site, or one opened from mail or chat, would navigate to
 //! `/api/update/stream` and start a Companion upgrade on a live rig.
 //!

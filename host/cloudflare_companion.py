@@ -243,7 +243,7 @@ def named(include):
 
     An address in two rules counts once; a list counts as one, whatever it holds."""
     addresses = len({(r["email"].get("email") or "").lower() for r in include if "email" in r})
-    lists = sum(1 for r in include if "email_list" in r)
+    lists = len({(r["email_list"] or {}).get("id") for r in include if "email_list" in r})
     text = f"{addresses} e-mail address{'' if addresses == 1 else 'es'}"
     return text + (f" and {lists} e-mail list{'' if lists == 1 else 's'}" if lists else "")
 
@@ -538,10 +538,15 @@ def run(cf, apply, out=print):
             "the team login renews it without a PIN until that login itself expires")
     for domain in CHECKED_ALIASES:
         for app in (a for a in st["apps"][domain] if covers(a, domain)):
-            if basic["id"] in [p.get("id") for p in app.get("policies") or []]:
-                out(f"ok      alias {domain}: Access app '{app.get('name')}' uses '{ACCESS_POLICY}' too, so it lets in the same people")
-            else:
+            ids = [p.get("id") for p in app.get("policies") or []]
+            others = len([i for i in ids if i != basic["id"]])
+            if basic["id"] not in ids:
                 out(f"note    alias {domain}: Access app '{app.get('name')}' does not use '{ACCESS_POLICY}', so it may let in other people")
+            elif others:
+                out(f"note    alias {domain}: Access app '{app.get('name')}' uses '{ACCESS_POLICY}' plus {others} other "
+                    f"polic{'y' if others == 1 else 'ies'}, so it may let in other people")
+            else:
+                out(f"ok      alias {domain}: Access app '{app.get('name')}' uses '{ACCESS_POLICY}' too, so it lets in the same people")
     auds = {}
     for domain in CHECKED_ALIASES:
         auds[domain] = next((a.get("aud") for a in st["apps"][domain] if covers(a, domain)), None)
