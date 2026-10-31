@@ -836,5 +836,15 @@ class Main(unittest.TestCase):
         self.assertIn("still pending", str(ctx.exception))
 
 
+class TunnelConfig(unittest.TestCase):
+    def test_the_tunnel_is_pinned_to_http2_not_quic(self):
+        # QUIC is cloudflared's default. On the rigs its UDP path stalls ("timeout: no
+        # recent network activity"): every stall flips the tunnel's health and mails the
+        # owner, while the presenter tunnel on http2 beside it has none (#33).
+        with open(os.path.join(HERE, "cloudflared-companion.yml")) as f:
+            settings = [line.split("#")[0].rstrip() for line in f]  # keeps indentation: only a top-level key counts
+        self.assertIn("protocol: http2", settings)
+
+
 if __name__ == "__main__":
     unittest.main()

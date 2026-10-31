@@ -4,3 +4,7 @@
 # tunnel. Ingress lives in Cloudflare (remotely managed tunnel); the run token
 # comes from /etc/cloudflared-companion.env.
 no-autoupdate: true
+# Not QUIC, the default: on the rigs its UDP path stalls, and every stall flips the
+# tunnel's health and sends a mail. The presenter tunnel beside it runs http2 and
+# logs no such stalls (companion-updater#33).
+protocol: http2
