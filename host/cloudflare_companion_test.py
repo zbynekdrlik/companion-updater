@@ -843,7 +843,8 @@ class TunnelConfig(unittest.TestCase):
         # owner, while the presenter tunnel on http2 beside it has none (#33).
         with open(os.path.join(HERE, "cloudflared-companion.yml")) as f:
             settings = [line.split("#")[0].rstrip() for line in f]  # keeps indentation: only a top-level key counts
-        self.assertIn("protocol: http2", settings)
+        protocols = [line for line in settings if line.startswith("protocol:")]
+        self.assertEqual(protocols, ["protocol: http2"])  # a second key could override it
 
 
 if __name__ == "__main__":
