@@ -142,3 +142,5 @@ The NTP server comes from DHCP:
 - A DOWN for the same tunnel shortly after its previous DOWN alert was not sent: 33 s later, and also 18 min later at the pp deploy. So repeated DOWNs are deduplicated per tunnel for some undocumented window.
 - To test it, stop a tunnel that has had no recent DOWN alert, and read the history.
 - **Tooling without a Companion upgrade.** `COMPANION_UPGRADE=skip ./deploy.sh` deploys this repo's pieces (udev, time sync, backup pusher, updater, tunnel) and leaves Companion at its version. Without it, step 8 upgrades Companion to the latest stable.
+- **Scene buttons run through page 10.** Pages 2 and 3 press page 10, and each page 10 button loops pages 11 to 20 and presses the same row/column. On snv, page 15 (lights) runs only while the Home Assistant switch `SVETLA 01` (`switch.sonoff_10022c5f8d`) is on (#36), and a new page 15 button needs the same `logic_if`.
+- **`update_button` cannot put actions inside a `logic_if`.** Nested actions need a config DB edit with Companion stopped and a DB backup first. Pick the DB of the running version, not simply the newest `v5.*` directory (`active_db()` in `module/verify-deploy.py`).
