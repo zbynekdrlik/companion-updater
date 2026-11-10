@@ -1,6 +1,7 @@
 mod bitfocus;
 mod companion;
 mod guard;
+mod releases;
 mod safety;
 mod static_files;
 mod update;
@@ -32,6 +33,15 @@ struct AppState {
     http: reqwest::Client,
     last_update: Arc<Mutex<Option<Instant>>>,
     update_running: Arc<Mutex<bool>>,
+    releases: releases::ReleaseCache,
+}
+
+#[derive(Serialize)]
+struct ReleaseNotesResponse {
+    /// What an update would bring (newest first), or the installed version's
+    /// own notes when Companion is up to date.
+    releases: Vec<releases::ReleaseNote>,
+    error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -69,6 +79,7 @@ async fn main() {
             .expect("reqwest client"),
         last_update: Arc::new(Mutex::new(None)),
         update_running: Arc::new(Mutex::new(false)),
+        releases: releases::ReleaseCache::default(),
     };
 
     let app = router(state);
@@ -83,6 +94,7 @@ fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(static_files::index))
         .route("/api/status", get(status_handler))
+        .route("/api/release-notes", get(release_notes_handler))
         .route("/api/update/stream", get(update_stream_handler))
         .route("/healthz", get(|| async { "ok" }))
         .fallback(get(static_files::asset))
@@ -106,25 +118,25 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
     let update_running = *state.update_running.lock().await;
     let can_update = cooldown_remaining == 0 && !update_running;
 
-    let (current_version, latest_version, update_available, error) =
-        match (current_raw, latest_raw) {
-            (Ok(c), Ok(l)) => {
-                let avail = version::is_update_available(&c, &l);
-                (version::format(&c), version::format(&l), avail, None)
-            }
-            (Err(e), _) => (
-                "unknown".into(),
-                "unknown".into(),
-                false,
-                Some(format!("Cannot read installed version: {e}")),
-            ),
-            (Ok(c), Err(e)) => (
-                version::format(&c),
-                "unknown".into(),
-                false,
-                Some(format!("Cannot fetch latest version: {e}")),
-            ),
-        };
+    let (current_version, latest_version, update_available, error) = match (current_raw, latest_raw)
+    {
+        (Ok(c), Ok(l)) => {
+            let avail = version::is_update_available(&c, &l);
+            (version::format(&c), version::format(&l), avail, None)
+        }
+        (Err(e), _) => (
+            "unknown".into(),
+            "unknown".into(),
+            false,
+            Some(format!("Cannot read installed version: {e}")),
+        ),
+        (Ok(c), Err(e)) => (
+            version::format(&c),
+            "unknown".into(),
+            false,
+            Some(format!("Cannot fetch latest version: {e}")),
+        ),
+    };
 
     Json(StatusResponse {
         current_version,
@@ -140,21 +152,44 @@ async fn status_handler(State(state): State<AppState>) -> Json<StatusResponse> {
     })
 }
 
+async fn release_notes_handler(State(state): State<AppState>) -> Json<ReleaseNotesResponse> {
+    let current = companion::read_installed_version().await;
+    let latest = bitfocus::fetch_latest_stable_linux(&state.http).await;
+    let list = state.releases.get(&state.http).await;
+    Json(match (current, latest, list) {
+        (Ok(c), Ok(l), Ok(list)) => {
+            let picked = releases::select(&list, &c, &l);
+            tracing::debug!(current = %c, latest = %l, shown = picked.len(), "release notes");
+            ReleaseNotesResponse {
+                releases: picked,
+                error: None,
+            }
+        }
+        (Err(e), _, _) => ReleaseNotesResponse {
+            releases: vec![],
+            error: Some(format!("Cannot read installed version: {e}")),
+        },
+        (_, Err(e), _) => ReleaseNotesResponse {
+            releases: vec![],
+            error: Some(format!("Cannot fetch latest version: {e}")),
+        },
+        (_, _, Err(e)) => ReleaseNotesResponse {
+            releases: vec![],
+            error: Some(format!("Cannot fetch release notes: {e}")),
+        },
+    })
+}
+
 async fn update_stream_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<
-    Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>,
-    (StatusCode, String),
-> {
+) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
+{
     guard::reject_cross_site(&headers)?;
     {
         let mut running = state.update_running.lock().await;
         if *running {
-            return Err((
-                StatusCode::CONFLICT,
-                "Update already in progress".into(),
-            ));
+            return Err((StatusCode::CONFLICT, "Update already in progress".into()));
         }
         let last = state.last_update.lock().await;
         if let Some(t) = *last {
@@ -208,6 +243,7 @@ mod tests {
             http: reqwest::Client::new(),
             last_update: Arc::new(Mutex::new(None)),
             update_running: Arc::new(Mutex::new(true)),
+            releases: releases::ReleaseCache::default(),
         };
         let mut req = Request::builder().uri("/api/update/stream");
         for (k, v) in headers {
@@ -222,8 +258,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_stream_endpoint_refuses_a_cross_site_request() {
-        let status =
-            upgrade_request(&[("sec-fetch-site", "cross-site"), ("sec-fetch-mode", "navigate")]).await;
+        let status = upgrade_request(&[
+            ("sec-fetch-site", "cross-site"),
+            ("sec-fetch-mode", "navigate"),
+        ])
+        .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
@@ -236,7 +275,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_dashboard_eventsource_gets_past_the_guard() {
-        let status = upgrade_request(&[("sec-fetch-site", "same-origin"), ("sec-fetch-mode", "cors")]).await;
-        assert_eq!(status, StatusCode::CONFLICT, "past the guard, stopped by the running-update check");
+        let status = upgrade_request(&[
+            ("sec-fetch-site", "same-origin"),
+            ("sec-fetch-mode", "cors"),
+        ])
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "past the guard, stopped by the running-update check"
+        );
     }
 }

@@ -61,6 +61,8 @@ pub fn App() -> impl IntoView {
                 />
             </div>
 
+            <crate::components::release_notes::ReleaseNotesCard />
+
             <div class="actions">
                 <button class="refresh-btn" on:click=refresh>"Refresh"</button>
             </div>
@@ -69,9 +71,7 @@ pub fn App() -> impl IntoView {
 }
 
 async fn fetch_status(set_status: WriteSignal<Option<Status>>) {
-    let result = gloo_net::http::Request::get("/api/status")
-        .send()
-        .await;
+    let result = gloo_net::http::Request::get("/api/status").send().await;
     match result {
         Ok(resp) => {
             if let Ok(s) = resp.json::<Status>().await {
