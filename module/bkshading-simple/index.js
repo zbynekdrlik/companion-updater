@@ -248,9 +248,32 @@ class BkshadingSimpleInstance extends InstanceBase {
 			return
 		}
 		this.controller.select(id)
+		this.log('info', `Selected camera ${id}${this.cameraNote(id)}`)
+		this.publish()
+	}
+
+	/** ` (label): online|camera offline|relay not reachable|not in bkshading` for a log line. */
+	cameraNote(id) {
 		const cam = this.controller.camera(id)
 		const state = !cam ? 'not in bkshading' : this.controller.isOnline(id) ? 'online' : cam.reachable ? 'camera offline' : 'relay not reachable'
-		this.log('info', `Selected camera ${id}${cam && cam.label ? ` (${cam.label})` : ''}: ${state}`)
+		return `${cam && cam.label ? ` (${cam.label})` : ''}: ${state}`
+	}
+
+	async stepCameraAction(options) {
+		const direction = options.direction === 'previous' ? 'previous' : 'next'
+		if (!this.controller) {
+			this.log('error', `Camera ${direction}: bkshading host is not configured`)
+			return
+		}
+		const from = this.controller.selected
+		const id = this.controller.neighbour(direction === 'next' ? 1 : -1)
+		if (!id) {
+			this.log('error', `Camera ${direction}: no camera list (bkshading has no cameras or is not reachable); ${from || 'no camera'} stays selected`)
+			return
+		}
+		this.selected = id
+		this.controller.select(id)
+		this.log('info', `Camera ${direction}: ${from || '-'} -> ${id}${this.cameraNote(id)}`)
 		this.publish()
 	}
 
@@ -297,6 +320,23 @@ class BkshadingSimpleInstance extends InstanceBase {
 					},
 				],
 				callback: (action, context) => this.selectCameraAction(action.options, context),
+			},
+			step_camera: {
+				name: 'Select next / previous camera',
+				description: 'Moves the selection to the next or previous camera in bkshading\'s list, wrapping around at the ends.',
+				options: [
+					{
+						type: 'dropdown',
+						id: 'direction',
+						label: 'Direction',
+						default: 'next',
+						choices: [
+							{ id: 'next', label: 'Next (+)' },
+							{ id: 'previous', label: 'Previous (-)' },
+						],
+					},
+				],
+				callback: (action) => this.stepCameraAction(action.options),
 			},
 			step: {
 				name: 'Step ISO / aperture / WB / tint',

@@ -79,6 +79,22 @@ describe('ShadingController', () => {
 
 	afterEach(() => stopFakeBkshading(server))
 
+	test('neighbour() steps through the order, wraps, and starts at an end for an unknown selection', () => {
+		const c = new ShadingController({ client: null })
+		assert.equal(c.neighbour(1), null, 'no cameras, no neighbour')
+		c.applyAggregate({ cameras: [{ id: 'a' }, { id: 'b' }, { id: 'c' }] }, 0)
+		c.select('a')
+		assert.equal(c.neighbour(1), 'b')
+		assert.equal(c.neighbour(-1), 'c')
+		c.select('c')
+		assert.equal(c.neighbour(1), 'a')
+		c.select('zzz')
+		assert.equal(c.neighbour(1), 'a')
+		assert.equal(c.neighbour(-1), 'c')
+		c.select(null)
+		assert.equal(c.neighbour(1), 'a')
+	})
+
 	test('online / offline / unreachable / unknown cameras', () => {
 		assert.equal(ctl.isOnline('cam6'), true)
 		assert.equal(ctl.isOnline('cam4'), false)

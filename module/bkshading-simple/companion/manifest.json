@@ -3,7 +3,7 @@
 	"name": "bkshading Simple",
 	"shortname": "bkshading-simple",
 	"description": "Camera shading through the bkshading service: +/- steps of ISO, aperture, white balance and tint, exactly like the bkshading panel.",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"license": "MIT",
 	"repository": "git+https://github.com/zbynekdrlik/companion-updater.git",
 	"bugs": "https://github.com/zbynekdrlik/companion-updater/issues",
