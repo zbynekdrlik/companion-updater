@@ -83,6 +83,19 @@ class ShadingController {
 		this.selected = id
 	}
 
+	/**
+	 * The camera `dir` (+1 / -1) places away from the selected one in
+	 * bkshading's order, wrapping around. A selection bkshading does not have
+	 * starts at the first (+1) or last (-1) camera. null when no cameras are known.
+	 */
+	neighbour(dir) {
+		const n = this.order.length
+		if (!n) return null
+		const at = this.order.indexOf(this.selected)
+		if (at < 0) return dir > 0 ? this.order[0] : this.order[n - 1]
+		return this.order[(at + (dir > 0 ? 1 : -1) + n) % n]
+	}
+
 	/** True when the camera is in bkshading, its relay answers and the camera is on USB. */
 	isOnline(id) {
 		const cam = this.cameras.get(id)

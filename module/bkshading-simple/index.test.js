@@ -165,6 +165,40 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		assert.deepEqual(state.writes, [])
 	})
 
+	test('step_camera walks the bkshading camera order and wraps around', async () => {
+		const stepCam = (direction) => instance.actions.step_camera.callback({ options: { direction } }, context)
+		assert.deepEqual(instance.actions.step_camera.options[0].choices.map((c) => c.id), ['next', 'previous'])
+		await stepCam('next')
+		assert.equal(instance.variables.camera, 'cam4')
+		await stepCam('next')
+		assert.equal(instance.variables.camera, 'handheld-1')
+		await stepCam('next')
+		assert.equal(instance.variables.camera, 'cam6', 'after the last camera comes the first')
+		await stepCam('previous')
+		assert.equal(instance.variables.camera, 'handheld-1', 'before the first camera comes the last')
+		assert.ok(instance.logs.some(([l, m]) => l === 'info' && m === 'Camera previous: cam6 -> handheld-1 (Cam 1): relay not reachable'))
+		await instance.actions.step.callback({ options: { param: 'tint', direction: 'down', camera: '' } }, context)
+		assert.ok(instance.logs.some(([, m]) => /handheld-1 tint - failed/.test(m)), 'the steps act on the camera stepped to')
+		assert.deepEqual(state.writes, [])
+	})
+
+	test('step_camera from a camera bkshading does not have starts at the ends', async () => {
+		await instance.actions.select_camera.callback({ options: { camera: 'cam2' } }, context)
+		await instance.actions.step_camera.callback({ options: { direction: 'next' } }, context)
+		assert.equal(instance.variables.camera, 'cam6')
+		await instance.actions.select_camera.callback({ options: { camera: 'cam2' } }, context)
+		await instance.actions.step_camera.callback({ options: { direction: 'previous' } }, context)
+		assert.equal(instance.variables.camera, 'handheld-1')
+	})
+
+	test('step_camera with no cameras known keeps the selection and logs why', async () => {
+		state.cameras = []
+		await instance.poll()
+		await instance.actions.step_camera.callback({ options: { direction: 'next' } }, context)
+		assert.equal(instance.variables.camera, 'cam6')
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && m === 'Camera next: bkshading reports no cameras; cam6 stays selected'))
+	})
+
 	test('an explicit camera option overrides the selection', async () => {
 		await instance.actions.select_camera.callback({ options: { camera: 'cam4' } }, context)
 		await instance.actions.step.callback({ options: { param: 'tint', direction: 'down', camera: 'cam6' } }, context)
