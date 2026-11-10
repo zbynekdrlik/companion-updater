@@ -60,6 +60,13 @@ The dashboard shows its own version (`Dashboard: v<semver>` from
 curl, and compare with `updater/Cargo.toml`. `/api/status` reports the same
 value in `updater_version`.
 
+## Release notes card (#41)
+
+- `GET /api/release-notes` (`backend/src/releases.rs`): GitHub releases of bitfocus/companion, stable only (also no `-` in the tag), newer than installed up to the latest stable Linux build; up to date = the installed version's notes. Bitfocus's packages API has no notes.
+- Unauthenticated GitHub = 60 requests/hour/IP: list cached 10 min, a failed fetch blocks retries for 60 s and serves the stale list.
+- The frontend sets the notes with `inner_html`, so `render()` escapes raw HTML and rewrites every link/image target outside http(s)/mailto to `#`. Keep both when touching it.
+- `cargo fmt --all` reformats files CI never checked (update.rs, safety.rs, ...). Format only the files you changed (`rustfmt --edition 2021 <file>`).
+
 ## Hosts
 
 - `companion.lan` = companion-snv (x86_64), `companion-pp.lan` = the PP rig.
