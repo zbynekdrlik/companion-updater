@@ -196,7 +196,18 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		await instance.poll()
 		await instance.actions.step_camera.callback({ options: { direction: 'next' } }, context)
 		assert.equal(instance.variables.camera, 'cam6')
-		assert.ok(instance.logs.some(([l, m]) => l === 'error' && m === 'Camera next: bkshading reports no cameras; cam6 stays selected'))
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && m === 'Camera next: no camera list (bkshading has no cameras or is not reachable); cam6 stays selected'))
+	})
+
+	test('step_camera while bkshading is down keeps the selection and logs why', async () => {
+		instance.client.pollTimeoutMs = 200
+		state.hang = true
+		await instance.poll()
+		await instance.poll()
+		assert.equal(instance.statuses.at(-1)[0], mod.InstanceStatus.ConnectionFailure)
+		await instance.actions.step_camera.callback({ options: { direction: 'previous' } }, context)
+		assert.equal(instance.variables.camera, 'cam6')
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && m === 'Camera previous: no camera list (bkshading has no cameras or is not reachable); cam6 stays selected'))
 	})
 
 	test('an explicit camera option overrides the selection', async () => {
@@ -284,5 +295,8 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		assert.equal(instance.variables.camera, 'cam6')
 		await instance.actions.step.callback({ options: { param: 'iso', direction: 'up', camera: '' } }, context)
 		assert.ok(instance.logs.some(([l, m]) => l === 'error' && /bkshading host is not configured/.test(m)))
+		await instance.actions.step_camera.callback({ options: { direction: 'next' } }, context)
+		assert.ok(instance.logs.some(([l, m]) => l === 'error' && m === 'Camera next: bkshading host is not configured'))
+		assert.equal(instance.variables.camera, 'cam6')
 	})
 })

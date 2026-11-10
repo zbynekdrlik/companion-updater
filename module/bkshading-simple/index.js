@@ -268,7 +268,7 @@ class BkshadingSimpleInstance extends InstanceBase {
 		const from = this.controller.selected
 		const id = this.controller.neighbour(direction === 'next' ? 1 : -1)
 		if (!id) {
-			this.log('error', `Camera ${direction}: bkshading reports no cameras; ${from || 'no camera'} stays selected`)
+			this.log('error', `Camera ${direction}: no camera list (bkshading has no cameras or is not reachable); ${from || 'no camera'} stays selected`)
 			return
 		}
 		this.selected = id
