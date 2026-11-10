@@ -70,7 +70,9 @@ mod tests {
     #[test]
     fn a_sibling_newlevel_media_page_cannot_either() {
         assert_eq!(
-            reject_cross_site(&with(Some("same-site"), Some("cors"))).unwrap_err().0,
+            reject_cross_site(&with(Some("same-site"), Some("cors")))
+                .unwrap_err()
+                .0,
             StatusCode::FORBIDDEN
         );
     }
@@ -80,7 +82,9 @@ mod tests {
         // An external app's link, a bookmark and a typed URL all arrive as a
         // top-level navigation with Sec-Fetch-Site: none.
         assert_eq!(
-            reject_cross_site(&with(Some("none"), Some("navigate"))).unwrap_err().0,
+            reject_cross_site(&with(Some("none"), Some("navigate")))
+                .unwrap_err()
+                .0,
             StatusCode::FORBIDDEN
         );
     }

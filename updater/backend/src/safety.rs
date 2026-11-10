@@ -237,13 +237,15 @@ pub async fn import_companionconfig(bytes: Vec<u8>) -> Result<(), String> {
     }
 
     // 1. start
-    let id = next_id; next_id += 1;
+    let id = next_id;
+    next_id += 1;
     let r = call(
         &mut ws,
         id,
         "importExport.prepareImport.start",
         serde_json::json!({ "name": "rollback.companionconfig", "size": total_size }),
-    ).await?;
+    )
+    .await?;
     let session_id = r
         .pointer("/data")
         .and_then(|x| x.as_str())
@@ -255,7 +257,8 @@ pub async fn import_companionconfig(bytes: Vec<u8>) -> Result<(), String> {
     while offset < total_size {
         let end = (offset + IMPORT_CHUNK_BYTES).min(total_size);
         let chunk_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes[offset..end]);
-        let id = next_id; next_id += 1;
+        let id = next_id;
+        next_id += 1;
         call(
             &mut ws,
             id,
@@ -265,12 +268,14 @@ pub async fn import_companionconfig(bytes: Vec<u8>) -> Result<(), String> {
                 "offset": offset,
                 "data": chunk_b64,
             }),
-        ).await?;
+        )
+        .await?;
         offset = end;
     }
 
     // 3. complete
-    let id = next_id; next_id += 1;
+    let id = next_id;
+    next_id += 1;
     call(
         &mut ws,
         id,
@@ -279,7 +284,8 @@ pub async fn import_companionconfig(bytes: Vec<u8>) -> Result<(), String> {
             "sessionId": session_id,
             "expectedChecksum": sha1_hex,
         }),
-    ).await?;
+    )
+    .await?;
 
     // 4. importFull — apply with full reset-and-import. Note the asymmetry:
     //    `connections` and `userconfig` only accept "unchanged" | "reset"
@@ -304,7 +310,8 @@ pub async fn import_companionconfig(bytes: Vec<u8>) -> Result<(), String> {
                 "userconfig":          "unchanged",
             }
         }),
-    ).await?;
+    )
+    .await?;
 
     let _ = ws.close(None).await;
     Ok(())

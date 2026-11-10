@@ -19,8 +19,8 @@ pub async fn read_installed_version() -> Result<String, String> {
 }
 
 fn parse_version_from_json(content: &str) -> Result<String, String> {
-    let parsed: PackageJson = serde_json::from_str(content)
-        .map_err(|e| format!("Failed to parse package.json: {e}"))?;
+    let parsed: PackageJson =
+        serde_json::from_str(content).map_err(|e| format!("Failed to parse package.json: {e}"))?;
     Ok(parsed.version)
 }
 
