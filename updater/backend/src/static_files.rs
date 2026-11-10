@@ -34,8 +34,7 @@ async fn serve(path: &str) -> Response {
     let mut resp = Response::new(Body::from(file.contents()));
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&mime)
-            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&mime).unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     resp
 }

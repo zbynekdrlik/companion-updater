@@ -67,61 +67,62 @@ pub fn UpdateButton(
         };
 
         let es_for_msg = es.clone();
-        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
-            let data = event.data().as_string().unwrap_or_default();
-            let val: serde_json::Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
-            let kind = val
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or("")
-                .to_string();
-            let message = if let Some(m) = val.get("message").and_then(|m| m.as_str()) {
-                m.to_string()
-            } else if kind == "safety_pre" || kind == "safety_post" {
-                // Format counts inline.
-                let c = val.get("counts").cloned().unwrap_or_default();
-                let connections = c.get("connections").and_then(|x| x.as_u64()).unwrap_or(0);
-                let pages = c
-                    .get("pages_with_content")
-                    .and_then(|x| x.as_u64())
-                    .unwrap_or(0);
-                let buttons = c.get("buttons").and_then(|x| x.as_u64()).unwrap_or(0);
-                let triggers = c.get("triggers").and_then(|x| x.as_u64()).unwrap_or(0);
-                let label = if kind == "safety_pre" {
-                    "Pre-upgrade snapshot"
-                } else {
-                    "Post-upgrade snapshot"
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::new(
+            move |event: MessageEvent| {
+                let data = event.data().as_string().unwrap_or_default();
+                let val: serde_json::Value = match serde_json::from_str(&data) {
+                    Ok(v) => v,
+                    Err(_) => return,
                 };
-                format!(
+                let kind = val
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let message = if let Some(m) = val.get("message").and_then(|m| m.as_str()) {
+                    m.to_string()
+                } else if kind == "safety_pre" || kind == "safety_post" {
+                    // Format counts inline.
+                    let c = val.get("counts").cloned().unwrap_or_default();
+                    let connections =
+                        c.get("connections").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let pages =
+                        c.get("pages_with_content").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let buttons = c.get("buttons").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let triggers = c.get("triggers").and_then(|x| x.as_u64()).unwrap_or(0);
+                    let label = if kind == "safety_pre" {
+                        "Pre-upgrade snapshot"
+                    } else {
+                        "Post-upgrade snapshot"
+                    };
+                    format!(
                         "{label}: {connections} connections, {pages} pages, {buttons} buttons, {triggers} triggers"
                     )
-            } else {
-                "(no message)".to_string()
-            };
+                } else {
+                    "(no message)".to_string()
+                };
 
-            set_progress_lines.update(|v| {
-                v.push((kind.clone(), message));
-            });
-
-            let terminal = matches!(kind.as_str(), "complete" | "error" | "safety_rollback");
-            if terminal {
-                es_for_msg.close();
-                set_updating.set(false);
-                // Refresh status after a short delay
-                let set_status = set_status;
-                wasm_bindgen_futures::spawn_local(async move {
-                    gloo_timers::future::TimeoutFuture::new(1500).await;
-                    if let Ok(resp) = gloo_net::http::Request::get("/api/status").send().await {
-                        if let Ok(s) = resp.json::<Status>().await {
-                            set_status.set(Some(s));
-                        }
-                    }
+                set_progress_lines.update(|v| {
+                    v.push((kind.clone(), message));
                 });
-            }
-        });
+
+                let terminal = matches!(kind.as_str(), "complete" | "error" | "safety_rollback");
+                if terminal {
+                    es_for_msg.close();
+                    set_updating.set(false);
+                    // Refresh status after a short delay
+                    let set_status = set_status;
+                    wasm_bindgen_futures::spawn_local(async move {
+                        gloo_timers::future::TimeoutFuture::new(1500).await;
+                        if let Ok(resp) = gloo_net::http::Request::get("/api/status").send().await {
+                            if let Ok(s) = resp.json::<Status>().await {
+                                set_status.set(Some(s));
+                            }
+                        }
+                    });
+                }
+            },
+        );
         es.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         on_message.forget();
 
@@ -130,7 +131,10 @@ pub fn UpdateButton(
             es_for_err.close();
             set_updating.set(false);
             set_progress_lines.update(|v| {
-                v.push(("error".into(), "Connection lost. Please refresh.".into()));
+                v.push((
+                    "error".into(),
+                    "Connection lost. Please refresh.".into(),
+                ));
             });
         });
         es.set_onerror(Some(on_error.as_ref().unchecked_ref()));

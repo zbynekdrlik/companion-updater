@@ -174,40 +174,32 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
         .expect("reqwest client");
 
     // 1. Pre-upgrade snapshot.
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Taking pre-upgrade snapshot...".into(),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Taking pre-upgrade snapshot...".into(),
+    }).await;
 
     let pre_bytes = match crate::safety::fetch_export(&http).await {
         Ok(b) => b,
         Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("pre-upgrade snapshot failed: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("pre-upgrade snapshot failed: {e}"),
+            }).await;
             return false;
         }
     };
     let pre_counts = match crate::safety::count_from_companionconfig(&pre_bytes) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("pre-upgrade parse failed: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("pre-upgrade parse failed: {e}"),
+            }).await;
             return false;
         }
     };
     if let Err(e) = save_snapshot(&pre_bytes).await {
-        let _ = tx
-            .send(UpdateEvent::Error {
-                message: format!("could not persist pre-upgrade snapshot: {e}"),
-            })
-            .await;
+        let _ = tx.send(UpdateEvent::Error {
+            message: format!("could not persist pre-upgrade snapshot: {e}"),
+        }).await;
         return false;
     }
     let _ = tx.send(UpdateEvent::SafetyPre { counts: pre_counts }).await;
@@ -216,11 +208,9 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
     let pre_version = match crate::companion::read_installed_version().await {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("cannot read installed version: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("cannot read installed version: {e}"),
+            }).await;
             return false;
         }
     };
@@ -230,11 +220,9 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
         Ok(v) => Some(v),
         Err(e) => {
             tracing::warn!(error = %e, "could not fetch latest stable version");
-            let _ = tx
-                .send(UpdateEvent::Progress {
-                    message: format!("WARNING: could not fetch the list of available builds: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Progress {
+                message: format!("WARNING: could not fetch the list of available builds: {e}"),
+            }).await;
             None
         }
     };
@@ -257,11 +245,9 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
     //    leave the rig dark; the marker file it writes lets a NEXT process
     //    (after a kill -9 or a `systemctl stop companion-updater` that tears
     //    down this cgroup mid-run) finish the job on startup.
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Stopping companion service...".into(),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Stopping companion service...".into(),
+    }).await;
     let mut guard = CompanionDownGuard::arm().await;
     if let Err(e) = systemctl(&["stop", "companion"]).await {
         guard.disarm();
@@ -269,20 +255,16 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
         return false;
     }
 
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Starting update (stable channel)...".into(),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Starting update (stable channel)...".into(),
+    }).await;
     let skipped = match run_update_script(&tx).await {
         Ok(skipped) => skipped,
         Err(e) => {
             // Never leave the rig with Companion down because the script failed.
-            let _ = tx
-                .send(UpdateEvent::Progress {
-                    message: "Update script failed — restarting Companion...".into(),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Progress {
+                message: "Update script failed — restarting Companion...".into(),
+            }).await;
             let message = match systemctl(&["start", "companion"]).await {
                 Ok(()) => {
                     guard.disarm();
@@ -299,67 +281,51 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
     };
 
     // 5. Start Companion + wait for healthy.
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Starting companion service...".into(),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Starting companion service...".into(),
+    }).await;
     if let Err(e) = systemctl(&["start", "companion"]).await {
-        let _ = tx
-            .send(UpdateEvent::Error {
-                message: format!(
-                    "COMPANION IS STOPPED — start it manually: sudo systemctl start companion. \
+        let _ = tx.send(UpdateEvent::Error {
+            message: format!(
+                "COMPANION IS STOPPED — start it manually: sudo systemctl start companion. \
                  Cause: {e}"
-                ),
-            })
-            .await;
+            ),
+        }).await;
         return false;
     }
     guard.disarm();
     if let Err(e) =
         crate::safety::wait_until_healthy(&http, std::time::Duration::from_secs(60)).await
     {
-        let _ = tx
-            .send(UpdateEvent::Error {
-                message: format!("Companion did not return to healthy: {e}"),
-            })
-            .await;
+        let _ = tx.send(UpdateEvent::Error {
+            message: format!("Companion did not return to healthy: {e}"),
+        }).await;
         return false;
     }
 
     // 6. Post-upgrade snapshot.
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Taking post-upgrade snapshot...".into(),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Taking post-upgrade snapshot...".into(),
+    }).await;
     let post_bytes = match crate::safety::fetch_export(&http).await {
         Ok(b) => b,
         Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("post-upgrade snapshot failed: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("post-upgrade snapshot failed: {e}"),
+            }).await;
             return false;
         }
     };
     let post_counts = match crate::safety::count_from_companionconfig(&post_bytes) {
         Ok(c) => c,
         Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("post-upgrade parse failed: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("post-upgrade parse failed: {e}"),
+            }).await;
             return false;
         }
     };
-    let _ = tx
-        .send(UpdateEvent::SafetyPost {
-            counts: post_counts,
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::SafetyPost { counts: post_counts }).await;
 
     // 7. Compare; rollback if any decrease.
     if pre_counts.any_decreased(&post_counts) {
@@ -372,29 +338,23 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
         }).await;
 
         if let Err(e) = crate::safety::import_companionconfig(pre_bytes).await {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("rollback import failed: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("rollback import failed: {e}"),
+            }).await;
             return false;
         }
         if let Err(e) =
             crate::safety::wait_until_healthy(&http, std::time::Duration::from_secs(60)).await
         {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("Companion did not return to healthy after rollback: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("Companion did not return to healthy after rollback: {e}"),
+            }).await;
             return false;
         }
-        let _ = tx
-            .send(UpdateEvent::SafetyRollback {
-                message: "Data loss detected; rolled back to pre-upgrade state.".into(),
-                lost,
-            })
-            .await;
+        let _ = tx.send(UpdateEvent::SafetyRollback {
+            message: "Data loss detected; rolled back to pre-upgrade state.".into(),
+            lost,
+        }).await;
         return false;
     }
 
@@ -403,14 +363,12 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
     let new_version = match crate::companion::read_installed_version().await {
         Ok(v) => v,
         Err(e) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!(
-                        "Cannot verify the update: the installed version could not be read \
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!(
+                    "Cannot verify the update: the installed version could not be read \
                      after the run ({e}). Your configuration was left untouched."
-                    ),
-                })
-                .await;
+                ),
+            }).await;
             return false;
         }
     };
@@ -427,11 +385,9 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
     );
     let summary = match outcome {
         Outcome::Failed(message) => {
-            let _ = tx
-                .send(UpdateEvent::Error {
-                    message: format!("{message} Your configuration was left untouched."),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Error {
+                message: format!("{message} Your configuration was left untouched."),
+            }).await;
             return false;
         }
         Outcome::AlreadyLatest => format!(
@@ -452,21 +408,17 @@ pub async fn run_update(tx: mpsc::Sender<UpdateEvent>) -> bool {
     };
 
     let diff = crate::safety::Counts {
-        connections: post_counts
-            .connections
-            .saturating_sub(pre_counts.connections),
+        connections: post_counts.connections.saturating_sub(pre_counts.connections),
         pages_with_content: post_counts
             .pages_with_content
             .saturating_sub(pre_counts.pages_with_content),
         buttons: post_counts.buttons.saturating_sub(pre_counts.buttons),
         triggers: post_counts.triggers.saturating_sub(pre_counts.triggers),
     };
-    let _ = tx
-        .send(UpdateEvent::Complete {
-            message: summary,
-            diff: Some(diff),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Complete {
+        message: summary,
+        diff: Some(diff),
+    }).await;
     true
 }
 
@@ -594,11 +546,9 @@ async fn systemctl(args: &[&str]) -> Result<(), String> {
 /// end-of-run version check catches a resulting no-op, which is a far more
 /// useful error than aborting on a transient network hiccup.
 async fn update_companionpi_checkout(tx: &mpsc::Sender<UpdateEvent>) {
-    let _ = tx
-        .send(UpdateEvent::Progress {
-            message: "Updating companion-pi installer (git pull)...".into(),
-        })
-        .await;
+    let _ = tx.send(UpdateEvent::Progress {
+        message: "Updating companion-pi installer (git pull)...".into(),
+    }).await;
     let dir = companionpi_dir();
     let mut cmd = if use_sudo() {
         let mut c = Command::new("sudo");
@@ -613,11 +563,9 @@ async fn update_companionpi_checkout(tx: &mpsc::Sender<UpdateEvent>) {
             for stream in [&out.stdout, &out.stderr] {
                 for line in String::from_utf8_lossy(stream).lines() {
                     if !line.trim().is_empty() {
-                        let _ = tx
-                            .send(UpdateEvent::Progress {
-                                message: line.to_string(),
-                            })
-                            .await;
+                        let _ = tx.send(UpdateEvent::Progress {
+                            message: line.to_string(),
+                        }).await;
                     }
                 }
             }
@@ -625,24 +573,20 @@ async fn update_companionpi_checkout(tx: &mpsc::Sender<UpdateEvent>) {
                 tracing::info!("companion-pi checkout updated");
             } else {
                 tracing::warn!(status = %out.status, "git pull of companion-pi failed");
-                let _ = tx
-                    .send(UpdateEvent::Progress {
-                        message: format!(
-                            "WARNING: could not update the companion-pi installer ({}). \
+                let _ = tx.send(UpdateEvent::Progress {
+                    message: format!(
+                        "WARNING: could not update the companion-pi installer ({}). \
                          Continuing with the installed copy.",
-                            out.status
-                        ),
-                    })
-                    .await;
+                        out.status
+                    ),
+                }).await;
             }
         }
         Err(e) => {
             tracing::warn!(error = %e, "could not run git pull for companion-pi");
-            let _ = tx
-                .send(UpdateEvent::Progress {
-                    message: format!("WARNING: could not run git pull in {dir}: {e}"),
-                })
-                .await;
+            let _ = tx.send(UpdateEvent::Progress {
+                message: format!("WARNING: could not run git pull in {dir}: {e}"),
+            }).await;
         }
     }
 }
@@ -753,18 +697,12 @@ where
         if is_skip_marker(&line) {
             skipped.store(true, AtomicOrdering::SeqCst);
         }
-        if tx
-            .try_send(UpdateEvent::Progress { message: line })
-            .is_err()
-        {
+        if tx.try_send(UpdateEvent::Progress { message: line }).is_err() {
             dropped += 1;
         }
     }
     if dropped > 0 {
-        tracing::warn!(
-            dropped,
-            "progress lines dropped: the client was not reading"
-        );
+        tracing::warn!(dropped, "progress lines dropped: the client was not reading");
     }
 }
 
@@ -775,9 +713,7 @@ mod tests {
 
     #[test]
     fn event_progress_serializes() {
-        let e = UpdateEvent::Progress {
-            message: "hello".into(),
-        };
+        let e = UpdateEvent::Progress { message: "hello".into() };
         assert_eq!(
             serde_json::to_string(&e).unwrap(),
             r#"{"type":"progress","message":"hello"}"#
@@ -786,10 +722,7 @@ mod tests {
 
     #[test]
     fn event_complete_no_diff_serializes_compatibly() {
-        let e = UpdateEvent::Complete {
-            message: "done".into(),
-            diff: None,
-        };
+        let e = UpdateEvent::Complete { message: "done".into(), diff: None };
         assert_eq!(
             serde_json::to_string(&e).unwrap(),
             r#"{"type":"complete","message":"done"}"#
@@ -800,12 +733,7 @@ mod tests {
     fn event_complete_with_diff_serializes() {
         let e = UpdateEvent::Complete {
             message: "done".into(),
-            diff: Some(Counts {
-                connections: 0,
-                pages_with_content: 0,
-                buttons: 0,
-                triggers: 0,
-            }),
+            diff: Some(Counts { connections: 0, pages_with_content: 0, buttons: 0, triggers: 0 }),
         };
         assert_eq!(
             serde_json::to_string(&e).unwrap(),
@@ -815,9 +743,7 @@ mod tests {
 
     #[test]
     fn event_error_serializes() {
-        let e = UpdateEvent::Error {
-            message: "boom".into(),
-        };
+        let e = UpdateEvent::Error { message: "boom".into() };
         assert_eq!(
             serde_json::to_string(&e).unwrap(),
             r#"{"type":"error","message":"boom"}"#
@@ -827,18 +753,10 @@ mod tests {
     #[test]
     fn event_safety_pre_serializes_with_snake_case_tag() {
         let e = UpdateEvent::SafetyPre {
-            counts: Counts {
-                connections: 41,
-                pages_with_content: 20,
-                buttons: 250,
-                triggers: 47,
-            },
+            counts: Counts { connections: 41, pages_with_content: 20, buttons: 250, triggers: 47 },
         };
         let s = serde_json::to_string(&e).unwrap();
-        assert!(
-            s.starts_with(r#"{"type":"safety_pre","counts":"#),
-            "got {s}"
-        );
+        assert!(s.starts_with(r#"{"type":"safety_pre","counts":"#), "got {s}");
     }
 
     #[test]
@@ -847,10 +765,7 @@ mod tests {
             counts: Counts::default(),
         };
         let s = serde_json::to_string(&e).unwrap();
-        assert!(
-            s.starts_with(r#"{"type":"safety_post","counts":"#),
-            "got {s}"
-        );
+        assert!(s.starts_with(r#"{"type":"safety_post","counts":"#), "got {s}");
     }
 
     #[test]
@@ -873,9 +788,7 @@ mod tests {
     #[test]
     fn skip_marker_ignores_ordinary_progress() {
         assert!(!is_skip_marker("Extracting..."));
-        assert!(!is_skip_marker(
-            "Installing from https://example.com/x.tar.gz"
-        ));
+        assert!(!is_skip_marker("Installing from https://example.com/x.tar.gz"));
     }
 
     #[test]
@@ -1060,12 +973,7 @@ mod tests {
     fn event_safety_rollback_includes_lost_counts() {
         let e = UpdateEvent::SafetyRollback {
             message: "rolled back".into(),
-            lost: Counts {
-                connections: 0,
-                pages_with_content: 0,
-                buttons: 5,
-                triggers: 0,
-            },
+            lost: Counts { connections: 0, pages_with_content: 0, buttons: 5, triggers: 0 },
         };
         let s = serde_json::to_string(&e).unwrap();
         assert!(s.contains(r#""type":"safety_rollback""#), "got {s}");
