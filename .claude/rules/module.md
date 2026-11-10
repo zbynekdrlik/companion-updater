@@ -69,6 +69,8 @@ Behaviour the tests pin down:
   3. Add actions with MCP `update_button` `add_action`. It returns the `entityId`, which the MCP op `update_entity_options` then takes.
   4. Read every result back from `db.sqlite`; the text is in `style.layers[type=text].text.value`. Read only text and options there: entity ids still come from MCP, as said above.
 
+- A layered button can also be made by cloning a control's JSON in `db.sqlite` (Companion stopped, DB backup first; new `bank:` id, new entity ids, page grid updated). Set the real `connectionId` in every cloned action: an unknown one is silently dropped when Companion loads, leaving a key that does nothing (#39, snv/pp 33/2/4).
+
 ## Reading the rigs' logs
 
 - In `journalctl -u companion` a connection label is followed by an ANSI colour reset (`Instance/Connection/<label>\x1b[0m <message>`). So `grep 'Connection/resolume '` and `journalctl -g 'Connection/x '` match NOTHING. Strip the colour codes first (`sed 's/\x1b\[[0-9;]*m//g'`) and use `grep -a`.
