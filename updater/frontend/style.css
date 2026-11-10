@@ -157,7 +157,7 @@ h1 { font-size: 2rem; color: #fff; margin-bottom: 0.5rem; }
 .release-date { color: #888; font-size: 0.85rem; }
 .release-link { margin-left: auto; color: #4ecdc4; font-size: 0.85rem; }
 .release-body { font-size: 0.9rem; line-height: 1.45; overflow-wrap: anywhere; }
-.release-body h2 { display: none; }
+.release-body h2 { font-size: 1rem; color: #ddd; margin: 0.75rem 0 0.25rem; }
 .release-body h3 { font-size: 0.95rem; color: #ccc; margin: 0.75rem 0 0.25rem; }
 .release-body ul { padding-left: 1.25rem; }
 .release-body li { margin: 0.15rem 0; }
