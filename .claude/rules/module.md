@@ -96,4 +96,5 @@ Behaviour the tests pin down:
 - Clocks: the "poll older than the write" decisions use `performance.now()`, never `Date.now()`, because these rigs step their clocks through NTP.
 - Measured on pp, 2026-10-14: a PUT takes 0.4 s and the very next GET already shows the new value. Writes to one camera are serialised; each step is computed when its turn comes, from the value the previous write set; and a poll that started before a write never rolls it back (`applyAggregate(…, pollStartedAt)`).
 - Camera ids: snv cam1–cam7; pp cam4, cam6, cam7 and handheld-1..3. The OBS sources "Cam N" on the Grading page map to `camN`. A camera that is not in bkshading shows `-` and the press logs why.
+- Camera next/previous (`step_camera`, #39) walks `controller.order` (bkshading's list order) and wraps; a selection bkshading does not have starts at the first/last camera. Page 33 on both rigs: the camera-name key steps to the next camera, 2/4 steps back.
 - Live tests change a real camera on the rig. Step it back afterwards so the camera is left as it was.
