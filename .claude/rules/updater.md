@@ -152,3 +152,12 @@ The NTP server comes from DHCP:
 - **Scene buttons run through page 10.** Pages 2 and 3 press page 10, and each page 10 button loops pages 11 to 20 and presses the same row/column. On snv, page 15 (lights) runs only while the Home Assistant switch `SVETLA 01` (`switch.sonoff_10022c5f8d`) is on (#36), and a new page 15 button needs the same `logic_if`.
 - **`update_button` cannot put actions inside a `logic_if`.** Nested actions need a config DB edit with Companion stopped and a DB backup first. Pick the DB of the running version, not simply the newest `v5.*` directory (`active_db()` in `module/verify-deploy.py`).
 - **`set_page` with page `0` means "this page".** A navigation button set to 0 silently does nothing (snv 1/2/0 RESOLUME was 0, now 8).
+- **NEVER press a power-socket key to test it (#44, owner: "to ty prepinas zasuvky?!!! nesmiess").** Keys on snv pages 4 / 22 / 23 switch real sockets through Home Assistant (speakers, rack, PCs). Verify them read-only:
+  - the stored action list (DB dump);
+  - the emulator look, without clicking;
+  - Home Assistant state through `get_variable_value homeassistant-server entity.switch.<id>.value`.
+- **MCP `create_button` fails on Companion 5.1** with `No "mutation"-procedure on path "controls.resetControl"`. To add a key, stop Companion and back up the DB. Then insert a `controls` row (`bank:<21-char id>`) and the same id into `pages.value.controls[row][col]`.
+- **Expressions in a key.**
+  - Text: `"text": {"value": "`A\\n${expr}`", "isExpression": true}` (a template literal).
+  - Feedback: `definitionId: "check_expression"`, option `expression: {"value": "...", "isExpression": true}`.
+  - Inside both, `$(homeassistant-server:entity.switch.<id>.value) == 'on' ? 1 : 0` counts a socket that is on. An HA entity can read `unavailable` (snv SD1, 2026-11-11), so a count never reaches the total while it is offline.
