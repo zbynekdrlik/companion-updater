@@ -87,13 +87,14 @@ Behaviour the tests pin down:
 
 ## bkshading-simple — camera ISO / clona / WB / tint (companion-updater#22)
 
-- Talks to the **bkshading** service from the camera-box repo (issue 808) on the strih PC: `strih.lan:8770` on both rigs. On pp, `strih.lan` = strih-pp.lan 10.77.8.202. It uses only `GET /api/cameras` (polled every 2 s) and `PUT /api/cameras/:id/params` (ABSOLUTE values).
+- Talks to the **bkshading** service from the camera-box repo (issue 808) on the strih PC: `strih.lan:8770` on both rigs. On pp, `strih.lan` = strih-pp.lan 10.77.8.202. It uses only `GET /api/cameras` (polled every 2 s, and once after each aperture step) and `PUT /api/cameras/:id/params` (absolute values, except the relative `apertureStep`).
 - camera-box is a foreign repo: never change bkshading from here; file a ticket there.
-- The +/− steps mirror bkshading `web/app.js` exactly:
-  - ISO and aperture use `stepChoice` over `caps.isoChoices` / `caps.fNumberChoices`; aperture is sent as `apertureNorm = idx/(n-1)` and the f-number is `2^(apertureAv/2)`.
+- The +/− steps mirror the bkshading panel:
+  - ISO uses `stepChoice` over `caps.isoChoices` and is sent as the absolute `iso`.
+  - Aperture is the relay's RELATIVE fine step `{ apertureStep: ±1 }` (bkshading v0.2.1+, shading `docs/CONTRACT.md`), never `apertureNorm` over `caps.fNumberChoices`. That list is much coarser than the lens (pp cam6 lists 2.8, 3.2, 3.5 …; the fine step goes 2.8, 2.95, 3.1, 3.2, 3.3), and walking it made the Stream Deck jump (companion-updater#46, PP operator 18.11.2026).
+  - The landing of a fine step is only known afterwards: `controller.readBack` does one `GET /api/cameras` right after the PUT (the service polls the relays live and the relay answers the PUT after the iris settled) and takes that camera's whole view. At the lens end the relay moves nothing and reports `notApplied: ["apertureStep"]`; the press is then logged as "already at the end". The f-number is `2^(apertureAv/2)`.
   - WB steps ±100 K and tint ±1, FROM WHERE THE PANEL'S SLIDER SITS: the camera value is clamped and snapped to the slider grid first (WB 2500–10000 in steps of 50, tint −50…50), see `sliderValue`. At a slider end nothing is sent, just as the panel disables the button there. So 5627 K "+" sends 5750, and 2000 K "−" sends nothing.
   - If the panel's step logic changes, update `lib/steps.js` and its tests.
-- The f-number read back from `apertureAv` carries floating-point noise: f/4.5 comes back as 4.499999999999999. On pp cam6, 15 of the 27 stops read back a hair off (8 below, 7 above). `snapToChoice` absorbs it; a test steps from every real pp stop. This is a DELIBERATE difference from the panel, which has that dead press itself (reported on camera-box #808).
 - Writes: the module waits 12 s, because the service waits up to 10 s for the relay. A write the service completes must never be reported as failed, or the next queued step would resend the same target.
 - Clocks: the "poll older than the write" decisions use `performance.now()`, never `Date.now()`, because these rigs step their clocks through NTP.
 - Measured on pp, 2026-10-14: a PUT takes 0.4 s and the very next GET already shows the new value. Writes to one camera are serialised; each step is computed when its turn comes, from the value the previous write set; and a poll that started before a write never rolls it back (`applyAggregate(…, pollStartedAt)`).

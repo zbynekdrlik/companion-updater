@@ -2,8 +2,12 @@
 
 const { planStep, displayValues, StepError } = require('./steps')
 
-/** bkshading wire key reported in `notApplied` for each step parameter. */
-const WIRE_KEY = { iso: 'iso', aperture: 'apertureNorm', kelvin: 'kelvin', tint: 'tint' }
+/**
+ * bkshading wire keys reported in `notApplied` for each step parameter. The
+ * aperture step is `apertureStep`; `apertureNorm` is the panel's slider drag,
+ * which bkshading reports the same way.
+ */
+const WIRE_KEYS = { iso: ['iso'], aperture: ['apertureStep', 'apertureNorm'], kelvin: ['kelvin'], tint: ['tint'] }
 /** displayValues() key for each step parameter. */
 const DISPLAY_KEY = { iso: 'iso', aperture: 'fnumber', kelvin: 'kelvin', tint: 'tint' }
 
@@ -106,7 +110,7 @@ class ShadingController {
 	notApplied(id, param) {
 		const cam = this.cameras.get(id)
 		const list = cam && cam.state && Array.isArray(cam.state.notApplied) ? cam.state.notApplied : []
-		return list.includes(WIRE_KEY[param])
+		return WIRE_KEYS[param].some((key) => list.includes(key))
 	}
 
 	/**
@@ -143,6 +147,7 @@ class ShadingController {
 		const from = displayValues(cam.state.params)[DISPLAY_KEY[param]]
 		if (plan.unchanged) return { from, label: plan.label, unchanged: true, ms: 0 }
 		await this.client.setParams(id, plan.patch)
+		if (plan.relative) return { from, ...(await this.readBack(id, param)), patch: plan.patch, ms: Math.round(this.now() - started) }
 		// bkshading reflects a write in its very next GET; mirror that now so the
 		// next queued step starts from the new value.
 		const current = this.cameras.get(id)
@@ -151,6 +156,27 @@ class ShadingController {
 		}
 		return { from, label: plan.label, unchanged: false, patch: plan.patch, ms: Math.round(this.now() - started) }
 	}
+
+	/**
+	 * After a relative step only the camera knows where it landed. bkshading's
+	 * GET /api/cameras polls the relays live and the relay answers its PUT only
+	 * after the iris settled, so the next GET shows the landing. Take this
+	 * camera's whole view from it (params AND notApplied: the relay refuses a
+	 * step at the lens end there). A failed read leaves the camera as it was;
+	 * the regular poll brings the value in.
+	 */
+	async readBack(id, param) {
+		let fresh
+		try {
+			const aggregate = await this.client.cameras()
+			fresh = aggregate.cameras.find((c) => c && c.id === id)
+		} catch {
+			fresh = null
+		}
+		if (!fresh || !fresh.state) return { label: '?', unchanged: false }
+		this.cameras.set(id, fresh)
+		return { label: displayValues(fresh.state.params)[DISPLAY_KEY[param]], unchanged: this.notApplied(id, param) }
+	}
 }
 
-module.exports = { ShadingController, WIRE_KEY }
+module.exports = { ShadingController, WIRE_KEYS }
