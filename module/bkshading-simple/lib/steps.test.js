@@ -2,7 +2,7 @@
 
 const { test, describe } = require('node:test')
 const assert = require('node:assert/strict')
-const { stepChoice, fNumberFromAv, snapToChoice, sliderValue, displayValues, planStep, StepError, KELVIN_SLIDER, TINT_SLIDER } = require('./steps')
+const { stepChoice, fNumberFromAv, sliderValue, displayValues, planStep, StepError, KELVIN_SLIDER, TINT_SLIDER } = require('./steps')
 const { ppCam6 } = require('../testing/fake-bkshading')
 
 const ISO = [25, 100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000]
@@ -38,11 +38,6 @@ describe('aperture helpers', () => {
 		assert.equal(fNumberFromAv(undefined), null)
 		assert.equal(fNumberFromAv(Number.NaN), null)
 	})
-
-	test('snapToChoice absorbs floating-point noise only', () => {
-		assert.equal(snapToChoice(4.7999999, [4.5, 4.8, 5.2]), 4.8)
-		assert.equal(snapToChoice(4.65, [4.5, 4.8, 5.2]), 4.65)
-	})
 })
 
 describe('displayValues', () => {
@@ -68,23 +63,14 @@ describe('planStep on the real pp cam6 state', () => {
 		assert.deepEqual(planStep(state(), 'iso', -1).patch, { iso: 1250 })
 	})
 
-	test('aperture + from f/4.8 goes to f/5.2 and sends apertureNorm = idx/(n-1)', () => {
-		const s = state()
-		const n = s.caps.fNumberChoices.length
-		const up = planStep(s, 'aperture', 1)
-		assert.deepEqual(up.patch, { apertureNorm: 7 / (n - 1) })
-		assert.equal(up.label, 'f/5.2')
-		assert.ok(Math.abs(fNumberFromAv(up.params.apertureAv) - 5.2) < 1e-9)
-		const down = planStep(s, 'aperture', -1)
-		assert.deepEqual(down.patch, { apertureNorm: 5 / (n - 1) })
-		assert.equal(down.label, 'f/4.5')
-	})
-
-	test('aperture reading 4.7999999 still steps (not a dead press)', () => {
-		const s = state()
-		s.params.apertureAv = 2 * Math.log2(4.7999999)
-		assert.equal(planStep(s, 'aperture', 1).label, 'f/5.2')
-		assert.equal(planStep(s, 'aperture', -1).label, 'f/4.5')
+	test('aperture + / - send the relay's fine relative step, never an absolute list position (companion-updater#46)', () => {
+		const up = planStep(state(), 'aperture', 1)
+		assert.deepEqual(up.patch, { apertureStep: 1 })
+		assert.equal(up.relative, true)
+		assert.equal(up.unchanged, false)
+		const down = planStep(state(), 'aperture', -1)
+		assert.deepEqual(down.patch, { apertureStep: -1 })
+		assert.equal(down.relative, true)
 	})
 
 	test('WB steps 100 K and tint 1, clamped to the panel ranges', () => {
@@ -99,22 +85,6 @@ describe('planStep on the real pp cam6 state', () => {
 		assert.equal(planStep(s, 'tint', -1).unchanged, true)
 		s.params.kelvin = 2550
 		assert.deepEqual(planStep(s, 'kelvin', -1).patch, { kelvin: 2500 })
-	})
-
-	test('every real f-number stop steps to its neighbours (AV round-trip noise included)', () => {
-		// f/4.5 reads back just below its stop and f/4.8 just above: compared raw,
-		// "+" from f/4.5 and "-" from f/4.8 would resend the same stop.
-		const choices = ppCam6().state.caps.fNumberChoices
-		for (let i = 0; i < choices.length; i++) {
-			const s = state()
-			s.params.apertureAv = 2 * Math.log2(choices[i])
-			const up = planStep(s, 'aperture', 1)
-			const down = planStep(s, 'aperture', -1)
-			assert.equal(up.label, `f/${choices[Math.min(i + 1, choices.length - 1)].toFixed(1)}`, `+ from f/${choices[i]}`)
-			assert.equal(down.label, `f/${choices[Math.max(i - 1, 0)].toFixed(1)}`, `- from f/${choices[i]}`)
-			assert.equal(up.unchanged, i === choices.length - 1)
-			assert.equal(down.unchanged, i === 0)
-		}
 	})
 
 	test('WB steps from where the panel slider sits: snapped to 50 K and clamped', () => {
@@ -160,7 +130,8 @@ describe('planStep refuses with a reason instead of guessing', () => {
 		const noCaps = ppCam6().state
 		noCaps.caps = null
 		assert.throws(() => planStep(noCaps, 'iso', 1), /no ISO choices/)
-		assert.throws(() => planStep(noCaps, 'aperture', 1), /no f-number choices/)
+		// The fine step needs no f-number list: the relay walks the lens itself.
+		assert.deepEqual(planStep(noCaps, 'aperture', 1).patch, { apertureStep: 1 })
 		const noIso = ppCam6().state
 		noIso.params.iso = null
 		assert.throws(() => planStep(noIso, 'iso', 1), /no current ISO/)

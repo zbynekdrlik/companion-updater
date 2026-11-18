@@ -136,6 +136,36 @@ describe('ShadingController', () => {
 		assert.equal(maxInFlight, 1, 'two writes to one camera were in flight at once')
 	})
 
+	test('three fast aperture presses are three fine steps, each showing the f-number the camera landed on', async () => {
+		state.delayMs = (method) => (method === 'PUT' ? 30 : 0)
+		const results = await Promise.all([ctl.step('cam6', 'aperture', 1), ctl.step('cam6', 'aperture', 1), ctl.step('cam6', 'aperture', 1)])
+		assert.deepEqual(
+			state.writes.map((w) => w.patch),
+			[{ apertureStep: 1 }, { apertureStep: 1 }, { apertureStep: 1 }],
+		)
+		assert.deepEqual(
+			results.map((r) => [r.from, r.label]),
+			[
+				['f/4.8', 'f/5.1'],
+				['f/5.1', 'f/5.4'],
+				['f/5.4', 'f/5.7'],
+			],
+		)
+		assert.equal(ctl.camera('cam6').state.params.apertureAv, state.cameras[0].state.params.apertureAv)
+	})
+
+	test('an aperture press at the lens end is refused by the relay and reported as the end', async () => {
+		state.cameras[0].state.params.apertureAv = 2 * Math.log2(27)
+		ctl.applyAggregate(await client.cameras(), ctl.now())
+		const r = await ctl.step('cam6', 'aperture', 1)
+		assert.equal(r.unchanged, true)
+		assert.equal(r.label, 'f/27.0')
+		assert.equal(ctl.notApplied('cam6', 'aperture'), true)
+		const back = await ctl.step('cam6', 'aperture', -1)
+		assert.equal(back.unchanged, false)
+		assert.equal(ctl.notApplied('cam6', 'aperture'), false)
+	})
+
 	test('a poll that started before a write cannot roll the step back', async () => {
 		const startedAt = ctl.now() - 1000 // this GET left before the write below
 		const stale = await client.cameras() // still says 1600 (the fake answers instantly)
@@ -240,6 +270,9 @@ describe('ShadingController', () => {
 
 	test('notApplied maps step parameters to bkshading wire keys', async () => {
 		state.cameras[0].state.notApplied = ['apertureNorm']
+		await poll()
+		assert.equal(ctl.notApplied('cam6', 'aperture'), true)
+		state.cameras[0].state.notApplied = ['apertureStep']
 		await poll()
 		assert.equal(ctl.notApplied('cam6', 'aperture'), true)
 		assert.equal(ctl.notApplied('cam6', 'iso'), false)
