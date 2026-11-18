@@ -166,6 +166,30 @@ describe('ShadingController', () => {
 		assert.equal(ctl.notApplied('cam6', 'aperture'), false)
 	})
 
+	test('a stale poll from before an aperture step cannot bring back the old lens-end refusal', async () => {
+		state.cameras[0].state.params.apertureAv = 2 * Math.log2(27)
+		await poll()
+		await ctl.step('cam6', 'aperture', 1) // refused at the lens end
+		assert.equal(ctl.notApplied('cam6', 'aperture'), true)
+		const startedAt = ctl.now()
+		const stale = await client.cameras() // still reports the refusal
+		const back = await ctl.step('cam6', 'aperture', -1) // moves; the read-back clears it
+		assert.equal(back.unchanged, false)
+		ctl.applyAggregate(stale, startedAt)
+		assert.equal(ctl.notApplied('cam6', 'aperture'), false)
+		assert.equal(ctl.camera('cam6').state.params.apertureAv, state.cameras[0].state.params.apertureAv)
+	})
+
+	test('an aperture step whose read-back fails shows "?" and keeps the camera as it was', async () => {
+		const before = ctl.camera('cam6').state.params.apertureAv
+		state.getStatus = 500
+		const r = await ctl.step('cam6', 'aperture', 1)
+		assert.equal(r.label, '?')
+		assert.equal(r.unchanged, false)
+		assert.deepEqual(state.writes, [{ id: 'cam6', patch: { apertureStep: 1 } }])
+		assert.equal(ctl.camera('cam6').state.params.apertureAv, before, 'the regular poll brings the new value in')
+	})
+
 	test('a poll that started before a write cannot roll the step back', async () => {
 		const startedAt = ctl.now() - 1000 // this GET left before the write below
 		const stale = await client.cameras() // still says 1600 (the fake answers instantly)

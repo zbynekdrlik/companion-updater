@@ -50,6 +50,10 @@ function json(res, status, value) {
 
 function answer(state, req, res, body, snapshot) {
 	if (req.method === 'GET' && req.url === '/api/cameras') {
+		if (state.getStatus && state.getStatus !== 200) {
+			res.writeHead(state.getStatus, { 'Content-Type': 'text/plain' })
+			return res.end('service busy')
+		}
 		res.writeHead(200, { 'Content-Type': 'application/json' })
 		return res.end(snapshot)
 	}

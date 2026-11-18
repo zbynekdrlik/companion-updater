@@ -42,6 +42,8 @@ class ShadingController {
 		this.busy = new Map()
 		/** id -> time the last write to that camera finished */
 		this.lastWriteDone = new Map()
+		/** id -> when the GET of the last successful aperture read-back was sent */
+		this.readBackSent = new Map()
 	}
 
 	/**
@@ -50,6 +52,9 @@ class ShadingController {
 	 * written to, the answer may predate the write:
 	 * - the params our own write set are kept, so a slow poll can never roll a
 	 *   step back (everything else - online, caps, notApplied - is taken);
+	 * - after an aperture read-back that left later than this poll, its
+	 *   notApplied is kept too: the older answer would bring back a lens-end
+	 *   refusal the step just cleared (or hide one it just got);
 	 * - a "relay not reachable" answer is ignored: the relay is busy with our
 	 *   write (its read waits for the write burst, and the service gives up on
 	 *   a relay poll after 1.5 s), and taking it would fail the queued presses.
@@ -64,7 +69,9 @@ class ShadingController {
 			if (stale && own && own.reachable && own.state && !(cam.reachable && cam.state)) {
 				next.set(cam.id, own)
 			} else if (stale && own && own.state && cam.state) {
-				next.set(cam.id, { ...cam, state: { ...cam.state, params: own.state.params } })
+				const heldView = (this.readBackSent.get(cam.id) ?? -Infinity) > pollStartedAt
+				const notApplied = heldView ? own.state.notApplied : cam.state.notApplied
+				next.set(cam.id, { ...cam, state: { ...cam.state, params: own.state.params, notApplied } })
 			} else {
 				next.set(cam.id, cam)
 			}
@@ -166,6 +173,7 @@ class ShadingController {
 	 * the regular poll brings the value in.
 	 */
 	async readBack(id, param) {
+		const sentAt = this.now()
 		let fresh
 		try {
 			const aggregate = await this.client.cameras()
@@ -175,6 +183,7 @@ class ShadingController {
 		}
 		if (!fresh || !fresh.state) return { label: '?', unchanged: false }
 		this.cameras.set(id, fresh)
+		this.readBackSent.set(id, sentAt)
 		return { label: displayValues(fresh.state.params)[DISPLAY_KEY[param]], unchanged: this.notApplied(id, param) }
 	}
 }
