@@ -139,7 +139,7 @@ describe('BkshadingSimpleInstance against a fake bkshading', () => {
 		await step('kelvin', 'down')
 		await step('tint', 'up')
 		assert.equal(state.writes.length, 3)
-		assert.equal(instance.variables.fnumber, 'f/5.2')
+		assert.equal(instance.variables.fnumber, 'f/5.1')
 		assert.equal(instance.variables.kelvin, '4900K')
 		assert.equal(instance.variables.tint, '1')
 	})

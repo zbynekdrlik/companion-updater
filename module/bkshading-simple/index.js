@@ -340,7 +340,7 @@ class BkshadingSimpleInstance extends InstanceBase {
 			},
 			step: {
 				name: 'Step ISO / aperture / WB / tint',
-				description: 'One step, exactly like the bkshading panel: ISO and aperture move to the next camera choice, WB by 100 K, tint by 1.',
+				description: 'One step, exactly like the bkshading panel: ISO moves to the next camera choice, aperture one fine lens step (the camera shows where it landed), WB by 100 K, tint by 1.',
 				options: [
 					{
 						type: 'dropdown',

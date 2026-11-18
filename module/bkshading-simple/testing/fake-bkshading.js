@@ -10,11 +10,21 @@ const http = require('node:http')
  *                                    request ARRIVED (a delayed answer is old)
  *   PUT /api/cameras/:id/params   -> applies the absolute values like the relay
  *                                    projection does, answers { ok: true };
- *                                    404 unknown camera, 502 relay down
+ *                                    404 unknown camera, 502 relay down.
+ *                                    `apertureStep` (sign = direction) moves the
+ *                                    iris one fine lens step (FINE_STEP_AV); at
+ *                                    the lens end it moves nothing and reports
+ *                                    notApplied: ["apertureStep"], like the relay
  *
  * state: { cameras: [CameraView], requests: [], writes: [],
  *          hang?: bool, putStatus?: number, delayMs?: (method, url) => ms }
  */
+/**
+ * One fine iris step of the fake lens, in APEX Av: 1/6 stop, as PP cam6 moves
+ * on `apertureStep` (f/2.8 -> 2.95 -> 3.1 -> 3.2 -> 3.3, shading#6).
+ */
+const FINE_STEP_AV = 1 / 6
+
 function startFakeBkshading(state) {
 	state.requests = state.requests || []
 	state.writes = state.writes || []
@@ -65,6 +75,18 @@ function answer(state, req, res, body, snapshot) {
 		if (patch.iso !== undefined) p.iso = patch.iso
 		if (patch.kelvin !== undefined) p.kelvin = patch.kelvin
 		if (patch.tint !== undefined) p.tint = patch.tint
+		if (patch.apertureStep !== undefined) {
+			const choices = cam.state.caps.fNumberChoices
+			const [minAv, maxAv] = [2 * Math.log2(choices[0]), 2 * Math.log2(choices[choices.length - 1])]
+			const target = p.apertureAv + Math.sign(patch.apertureStep) * FINE_STEP_AV
+			if (target < minAv - 1e-9 || target > maxAv + 1e-9) {
+				cam.state.notApplied = ['apertureStep']
+			} else {
+				p.apertureAv = target
+				p.apertureNorm = (target - minAv) / (maxAv - minAv)
+				cam.state.notApplied = []
+			}
+		}
 		if (patch.apertureNorm !== undefined) {
 			const choices = cam.state.caps.fNumberChoices
 			const idx = Math.round(patch.apertureNorm * (choices.length - 1))
@@ -145,4 +167,4 @@ function unreachableCam(id) {
 	return { id, label: `Cam ${id.replace(/\D/g, '')}`, transport: 'cambox-relay', reachable: false, state: null }
 }
 
-module.exports = { startFakeBkshading, stopFakeBkshading, ppCam6, offlineCam, unreachableCam }
+module.exports = { FINE_STEP_AV, startFakeBkshading, stopFakeBkshading, ppCam6, offlineCam, unreachableCam }

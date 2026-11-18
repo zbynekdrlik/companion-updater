@@ -5,12 +5,18 @@
  * web panel (zbynekdrlik/camera-box bkshading/service/web/app.js), so a
  * Companion press and a panel tap move the camera the same way.
  *
- * - ISO and aperture step ONE camera choice (`stepChoice`, the JS mirror of
- *   the proto `mapping::step_choice`): "+" = the first choice strictly above
- *   the current value, "-" = the last strictly below; an off-grid value lands
- *   on the grid. ISO is sent as the absolute `iso`, aperture as
- *   `apertureNorm = idx/(n-1)` (the inverse of the relay's
- *   norm_to_choice_index over the same list).
+ * - ISO steps ONE camera choice (`stepChoice`, the JS mirror of the proto
+ *   `mapping::step_choice`): "+" = the first choice strictly above the
+ *   current value, "-" = the last strictly below; an off-grid value lands on
+ *   the grid. It is sent as the absolute `iso`.
+ * - Aperture is the relay's RELATIVE fine step `{ apertureStep: +1 | -1 }`
+ *   (bkshading v0.2.1+, shading docs/CONTRACT.md), exactly like the panel's
+ *   +/- buttons: the relay moves the iris one of the LENS's own steps (1/6
+ *   stop on pp cam6) and refuses at the lens end with
+ *   `notApplied: ["apertureStep"]`. The camera's `fNumberChoices` list is far
+ *   coarser, so walking it made the Stream Deck jump (companion-updater#46).
+ *   Where the iris lands is only known after the write: the controller reads
+ *   it back (`relative: true`).
  * - White balance steps KELVIN_STEP K and tint TINT_STEP, clamped to the
  *   panel's slider ranges.
  *
@@ -22,18 +28,6 @@ const TINT_STEP = 1
 /** The panel's sliders (web/index.html): min, max and the slider's own step grid. */
 const KELVIN_SLIDER = { min: 2500, max: 10000, grid: 50 }
 const TINT_SLIDER = { min: -50, max: 50, grid: 1 }
-/**
- * apertureAv -> f-number goes through floating point (2^(av/2)), so a lens
- * sitting exactly on a stop reads back a hair off it: on the pp cam6 list
- * f/4.5, 6.2, 10, 12, 17, 19, 25 and 27 come back just below the stop and
- * f/3.5, 4.8, 6.7, 7.3, 14, 15 and 21 just above. Within this distance of a
- * choice the value counts as that choice, or "+" (resp. "-") would "step" to
- * the same f-number and the press would do nothing. The bkshading panel
- * itself has that dead press (it compares the raw value); this module
- * deliberately does not copy the bug.
- */
-const SNAP_EPSILON = 0.005
-
 const PARAMS = ['iso', 'aperture', 'kelvin', 'tint']
 
 class StepError extends Error {
@@ -59,12 +53,6 @@ function stepChoice(current, choices, dir) {
 /** The f-number for bkshading's `apertureAv` (AV = 2*log2(N)), or null. */
 function fNumberFromAv(av) {
 	return typeof av === 'number' && Number.isFinite(av) ? Math.sqrt(Math.pow(2, av)) : null
-}
-
-/** `value`, replaced by the choice it is within SNAP_EPSILON of (floating-point noise). */
-function snapToChoice(value, choices) {
-	for (const c of choices) if (Math.abs(c - value) <= SNAP_EPSILON) return c
-	return value
 }
 
 function clamp(value, min, max) {
@@ -105,11 +93,13 @@ function numericChoices(list) {
  * Plan one step of `param` in direction `dir` (+1 / -1) for a camera's
  * bkshading `state` ({ online, params, caps }).
  *
- * Returns { patch, params, label, unchanged }:
+ * Returns { patch, params, label, unchanged, relative }:
  *   patch     the body for PUT /api/cameras/:id/params
  *   params    the params the camera will have once it applies the patch
- *   label     the new value as shown on the button
+ *             (null for a relative step: only the camera knows)
+ *   label     the new value as shown on the button (null for a relative step)
  *   unchanged true when the value is already at its end (no PUT needed)
+ *   relative  true when the result must be read back from bkshading
  * Throws StepError with a readable reason when the step cannot be made.
  */
 function planStep(state, param, dir) {
@@ -129,20 +119,8 @@ function planStep(state, param, dir) {
 	}
 
 	if (param === 'aperture') {
-		const choices = numericChoices(caps.fNumberChoices)
-		if (choices.length < 2) throw new StepError('the camera reports no f-number choices')
-		const current = fNumberFromAv(params.apertureAv)
-		if (current === null) throw new StepError('the camera reports no current aperture')
-		const snapped = snapToChoice(current, choices)
-		const idx = stepChoice(snapped, choices, dir)
-		const target = choices[idx]
-		const norm = idx / (choices.length - 1)
-		return {
-			patch: { apertureNorm: norm },
-			params: { ...params, apertureAv: 2 * Math.log2(target), apertureNorm: norm },
-			label: formatFNumber(target),
-			unchanged: target === snapped,
-		}
+		if (fNumberFromAv(params.apertureAv) === null) throw new StepError('the camera reports no current aperture')
+		return { patch: { apertureStep: dir }, params: null, label: null, unchanged: false, relative: true }
 	}
 
 	const [key, step, slider, suffix] = param === 'kelvin' ? ['kelvin', KELVIN_STEP, KELVIN_SLIDER, 'K'] : ['tint', TINT_STEP, TINT_SLIDER, '']
@@ -164,7 +142,6 @@ module.exports = {
 	StepError,
 	stepChoice,
 	fNumberFromAv,
-	snapToChoice,
 	sliderValue,
 	displayValues,
 	planStep,
