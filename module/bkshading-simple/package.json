@@ -1,6 +1,6 @@
 {
 	"name": "bkshading-simple",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "Companion control for bkshading camera shading: +/- steps of ISO, aperture, white balance and tint on the camera selected from Companion.",
 	"main": "index.js",
 	"type": "commonjs",
