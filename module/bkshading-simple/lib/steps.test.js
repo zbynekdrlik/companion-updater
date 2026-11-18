@@ -63,7 +63,7 @@ describe('planStep on the real pp cam6 state', () => {
 		assert.deepEqual(planStep(state(), 'iso', -1).patch, { iso: 1250 })
 	})
 
-	test('aperture + / - send the relay's fine relative step, never an absolute list position (companion-updater#46)', () => {
+	test('aperture + / - send the relay fine relative step, never an absolute list position (companion-updater#46)', () => {
 		const up = planStep(state(), 'aperture', 1)
 		assert.deepEqual(up.patch, { apertureStep: 1 })
 		assert.equal(up.relative, true)
