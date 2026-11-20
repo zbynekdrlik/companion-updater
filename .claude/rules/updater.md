@@ -79,16 +79,16 @@ value in `updater_version`.
 
 Exception (#49): when `dsync.service` is enabled, dsync keeps the clock (PTP) and turns NTP off at its start, so the script changes nothing and logs that. Both rigs ran dsync on 2026-11-20 (`NTP=no` is then correct).
 
-## Backup pusher (#8)
-
-`companion-backup-push.sh` pushes the newest `.companionconfig` across ALL `v*/backups` dirs. Companion writes them only when its scheduled backup rule is on: snv and pp both run "Hourly Backup" (export-json, `0 * * * *`, keep 90) since 2026-11-20. A Companion major bump moves backups to a new `v<major.minor>/backups` dir.
-
 The NTP server comes from DHCP:
 
 - pp uses `10.77.8.1`, its router.
 - snv uses `strih.lan` (10.77.9.202), which itself runs about 0.9 s off.
 
 "Synchronised" only means synchronised to that server. Measure the real offset with an SNTP query to `pool.ntp.org`, not with `timedatectl`.
+
+## Backup pusher (#8)
+
+`companion-backup-push.sh` pushes the newest `.companionconfig` across ALL `v*/backups` dirs. Companion writes them only when its scheduled backup rule is on: snv and pp both run "Hourly Backup" (export-json, `0 * * * *`, keep 90) since 2026-11-20. A Companion major bump moves backups to a new `v<major.minor>/backups` dir.
 
 ## Web UI over Cloudflare (#26)
 
