@@ -77,12 +77,18 @@ value in `updater_version`.
 
 `deploy.sh` step 3 runs `host/ensure-timesync.sh`. It runs `timedatectl set-ntp true` and fails unless the clock reports `NTPSynchronized=yes`. timesyncd was disabled on both rigs out of the box (#19).
 
+Exception (#49): when `dsync.service` is enabled, dsync keeps the clock (PTP) and turns NTP off at its start, so the script changes nothing and logs that. Both rigs ran dsync on 2026-11-20 (`NTP=no` is then correct).
+
 The NTP server comes from DHCP:
 
 - pp uses `10.77.8.1`, its router.
 - snv uses `strih.lan` (10.77.9.202), which itself runs about 0.9 s off.
 
 "Synchronised" only means synchronised to that server. Measure the real offset with an SNTP query to `pool.ntp.org`, not with `timedatectl`.
+
+## Backup pusher (#8)
+
+`companion-backup-push.sh` pushes the newest `.companionconfig` across ALL `v*/backups` dirs. Companion writes them only when its scheduled backup rule is on: snv and pp both run "Hourly Backup" (export-json, `0 * * * *`, keep 90) since 2026-11-20. A Companion major bump moves backups to a new `v<major.minor>/backups` dir.
 
 ## Web UI over Cloudflare (#26)
 
@@ -150,7 +156,8 @@ The NTP server comes from DHCP:
 - To test it, stop a tunnel that has had no recent DOWN alert, and read the history.
 - **Tooling without a Companion upgrade.** `COMPANION_UPGRADE=skip ./deploy.sh` deploys this repo's pieces (udev, time sync, backup pusher, updater, tunnel) and leaves Companion at its version. Without it, step 8 upgrades Companion to the latest stable.
 - **Scene buttons run through page 10.** Pages 2 and 3 press page 10, and each page 10 button loops pages 11 to 20 and presses the same row/column. On snv, page 15 (lights) runs only while the Home Assistant switch `SVETLA 01` (`switch.sonoff_10022c5f8d`) is on (#36), and a new page 15 button needs the same `logic_if`.
-- **`update_button` cannot put actions inside a `logic_if`.** Nested actions need a config DB edit with Companion stopped and a DB backup first. Pick the DB of the running version, not simply the newest `v5.*` directory (`active_db()` in `module/verify-deploy.py`).
+- **`update_button` cannot put actions inside a `logic_if`.** Use Companion's tRPC WebSocket instead (no restart): `controls.entities.add` / `setOption` / `move`, recipe in `.claude/rules/module.md`. When a DB read is needed, pick the DB of the running version, not simply the newest `v5.*` directory (`active_db()` in `module/verify-deploy.py`).
+- **Other tRPC paths used live (2026-11-20, Companion 5.1, `ws://<host>:8000/trpc`):** `instances.connections.delete {connectionId}` deletes a connection and its actions/feedbacks on every key (DB backup first); `importExport.backupRules.updateRuleField {ruleId, field, value}` and `.runBackupNow {ruleId}` edit the scheduled backup (`userconfig.backups` refuses a direct `setConfigKey`).
 - **`set_page` with page `0` means "this page".** A navigation button set to 0 silently does nothing (snv 1/2/0 RESOLUME was 0, now 8).
 - **NEVER press a power-socket key to test it (#44, owner: "to ty prepinas zasuvky?!!! nesmiess").** Keys on snv pages 4 / 22 / 23 switch real sockets through Home Assistant (speakers, rack, PCs). Verify them read-only:
   - the stored action list (DB dump);

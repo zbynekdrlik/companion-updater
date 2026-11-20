@@ -11,26 +11,37 @@ set -euo pipefail
 #                                              backup repo only)
 # Required env (provided by systemd unit):
 #   MACHINE — "companion-snv" or "companion-pp"
+# Optional env (tests): COMPANION_CONFIG_DIR, BACKUP_STATE_DIR.
 
-REPO_DIR="/var/lib/companion-backup/repo"
-HASH_FILE="/var/lib/companion-backup/last-pushed.sha256"
+STATE_DIR="${BACKUP_STATE_DIR:-/var/lib/companion-backup}"
+REPO_DIR="${STATE_DIR}/repo"
+HASH_FILE="${STATE_DIR}/last-pushed.sha256"
 SSH_KEY="/root/.ssh/companion_backup_id_ed25519"
-COMPANION_BACKUPS_GLOB="/home/companion/.config/companion-nodejs/v4.*/backups"
+CONFIG_DIR="${COMPANION_CONFIG_DIR:-/home/companion/.config/companion-nodejs}"
 
 if [ -z "${MACHINE:-}" ]; then
   echo "ERROR: MACHINE env var not set" >&2
   exit 1
 fi
 
-# 1. Find the most recent .companionconfig across all version subdirs.
-# shellcheck disable=SC2086 # Intentional glob expansion of v4.* version dirs.
-LATEST="$(find ${COMPANION_BACKUPS_GLOB} -maxdepth 1 -name '*.companionconfig' -printf '%T@ %p\n' 2>/dev/null \
-  | sort -nr | head -n1 | awk '{print $2}')"
+# 1. Find the most recent .companionconfig across all Companion versions
+# (v4.*, v5.*, ...; #8: a v4-only glob missed every Companion 5 backup).
+# awk keeps the newest line itself and reads all input, so nothing upstream
+# gets SIGPIPE (`sort | head` under pipefail died with `sort: write error`).
+shopt -s nullglob
+BACKUP_DIRS=("${CONFIG_DIR}"/v*/backups)
+shopt -u nullglob
+LATEST=""
+if [ "${#BACKUP_DIRS[@]}" -gt 0 ]; then
+  LATEST="$(find "${BACKUP_DIRS[@]}" -maxdepth 1 -type f -name '*.companionconfig' -printf '%T@ %p\n' \
+    | awk 'NR == 1 || $1 > best { best = $1; line = $0 } END { if (line != "") { sub(/^[^ ]+ /, "", line); print line } }')"
+fi
 
 if [ -z "${LATEST}" ] || [ ! -f "${LATEST}" ]; then
-  echo "ERROR: no .companionconfig found under ${COMPANION_BACKUPS_GLOB}" >&2
+  echo "ERROR: no .companionconfig found under ${CONFIG_DIR}/v*/backups" >&2
   exit 1
 fi
+echo "Newest backup: ${LATEST}"
 
 # 2. Hash compare with last-pushed.
 NEW_HASH="$(sha256sum "${LATEST}" | awk '{print $1}')"

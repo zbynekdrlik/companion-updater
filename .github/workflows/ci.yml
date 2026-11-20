@@ -89,6 +89,9 @@ jobs:
       - name: ensure-timesync.sh tests
         run: python3 host/ensure_timesync_test.py
 
+      - name: companion-backup-push.sh tests
+        run: python3 host/companion_backup_push_test.py
+
       - name: ensure-companion-proxy.sh tests
         run: python3 host/ensure_companion_proxy_test.py
 
