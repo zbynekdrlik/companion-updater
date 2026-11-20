@@ -5,7 +5,16 @@
 #
 # companion-updater#19: timesyncd was disabled on both rigs and companion-pp
 # drifted 60 s behind.
+#
+# companion-updater#49: where dsync.service keeps the clock (PTP), dsync turns
+# NTP off at its start. Turning timesyncd back on would fight it, so on such a
+# box this script changes nothing.
 set -euo pipefail
+
+if [ "$(systemctl is-enabled dsync.service 2>/dev/null || true)" = "enabled" ]; then
+  echo "  dsync.service is enabled: it keeps the clock, leaving timesyncd (NTP) off."
+  exit 0
+fi
 
 TRIES="${TIMESYNC_TRIES:-30}"
 INTERVAL="${TIMESYNC_INTERVAL:-2}"
