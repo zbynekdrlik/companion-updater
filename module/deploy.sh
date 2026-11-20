@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Deploy one of our Companion modules to one rig.
-# Usage: COMPANION_PASS=... module/deploy.sh <host> [module-id]
-#   hosts: companion.lan (snv), 100.101.72.101 (pp)
+# Usage: module/deploy.sh <host> [module-id]   (SSH key: $COMPANION_SSH_KEY, default ~/.ssh/companion_rigs_ed25519)
+#   hosts: companion.lan (snv), companion-pp.lan (pp)
 #   module-id: a directory under module/ (default: resolume-simple)
 #
 # Both rigs run Companion with --extra-module-path /opt/companion-module-dev,
@@ -15,11 +15,14 @@ set -euo pipefail
 # previous module is kept until the new one is verified, and a failed
 # verification rolls back to it.
 
-HOST="${1:?usage: COMPANION_PASS=... module/deploy.sh <host> [module-id]}"
+HOST="${1:?usage: module/deploy.sh <host> [module-id]}"
 MODULE_ID="${2:-resolume-simple}"
 COMPANION_USER="${COMPANION_USER:-newlevel}"
-: "${COMPANION_PASS:?set COMPANION_PASS (SSH password of ${COMPANION_USER})}"
-export SSHPASS="${COMPANION_PASS}"   # sshpass -e: keeps the password off the command line
+COMPANION_SSH_KEY="${COMPANION_SSH_KEY:-${HOME}/.ssh/companion_rigs_ed25519}"
+if [ ! -r "${COMPANION_SSH_KEY}" ]; then
+  echo "ERROR: SSH key ${COMPANION_SSH_KEY} not readable (set COMPANION_SSH_KEY)" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="${SCRIPT_DIR}/${MODULE_ID}"
@@ -36,10 +39,12 @@ DEST="/opt/companion-module-dev/${MODULE_ID}"
 # every module directory it finds there, and a second copy with the same id
 # silently wins over the new one.
 OLD="/opt/companion-module-backup/${MODULE_ID}"
-SSH_OPTS=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
+# Key auth only (airuleset#1385): never fall back to a password prompt.
+SSH_OPTS=(-i "${COMPANION_SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes -o PasswordAuthentication=no
+  -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 
 remote() {
-  sshpass -e ssh "${SSH_OPTS[@]}" "${COMPANION_USER}@${HOST}" "$@"
+  ssh "${SSH_OPTS[@]}" "${COMPANION_USER}@${HOST}" "$@"
 }
 
 # Deploy only committed, pushed code (the module and this script).
@@ -69,7 +74,7 @@ find "${PKG}/lib" -name '*.test.js' -delete
 tar -C "${STAGE}" -czf "${STAGE}/${MODULE_ID}.tgz" "${MODULE_ID}"
 
 echo "[2/5] Uploading..."
-sshpass -e scp "${SSH_OPTS[@]}" "${STAGE}/${MODULE_ID}.tgz" "${COMPANION_USER}@${HOST}:/tmp/${MODULE_ID}.tgz"
+scp "${SSH_OPTS[@]}" "${STAGE}/${MODULE_ID}.tgz" "${COMPANION_USER}@${HOST}:/tmp/${MODULE_ID}.tgz"
 
 rollback() {
   echo "ERROR: $1 — rolling back" >&2

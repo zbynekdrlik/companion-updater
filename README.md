@@ -56,11 +56,11 @@ When an update is triggered it:
 Deploy to `companion.lan` (or any target host) over SSH:
 
 ```bash
-# Deploys to companion.lan as newlevel; the SSH password is required and never committed
-COMPANION_PASS=... ./deploy.sh
+# Deploys to companion.lan as newlevel with the SSH key ~/.ssh/companion_rigs_ed25519
+./deploy.sh
 
-# Other target host or user
-COMPANION_HOST=companion-pp.lan COMPANION_USER=admin COMPANION_PASS=... ./deploy.sh
+# Other target host, user or key
+COMPANION_HOST=companion-pp.lan COMPANION_USER=admin COMPANION_SSH_KEY=~/.ssh/other_key ./deploy.sh
 ```
 
 The deploy script (`[1/9]`…`[9/9]` in its output):
@@ -77,7 +77,7 @@ The deploy script (`[1/9]`…`[9/9]` in its output):
    deploys the tooling only and leaves Companion at its version
 9. Waits for health checks to pass, then checks again, after the upgrade, that Companion accepts the web UI connection from the tunnel (whenever this deploy started the tunnel or one is running)
 
-**Requirements:** `sshpass` must be installed on the machine running the deploy.
+**Requirements:** the deploying account's public key in `~<user>/.ssh/authorized_keys` on the rig. SSH runs with `BatchMode=yes` and `PasswordAuthentication=no`, so it never asks for a password.
 
 ## Directory Structure
 
@@ -134,7 +134,7 @@ COMPANION_ALERT_EMAILS=<alert e-mail> host/cloudflare_companion.py apply
 host/cloudflare_companion.py status                                        # exit 1 = a tunnel is down
 
 # The rig's run token (the tunnel is chosen from the rig's hostname; never printed)
-COMPANION_ALERT_EMAILS=<alert e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token companion.lan
+COMPANION_ALERT_EMAILS=<alert e-mail> host/cloudflare_companion.py install-token companion.lan
 ```
 
 Then `deploy.sh` installs the unit. It fails if the tunnel token is missing (opt out with `COMPANION_TUNNEL=skip`), if the public URL does not answer with the Access login, or if Companion refuses the web UI connection from the tunnel.

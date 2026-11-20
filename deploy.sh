@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Deploy companion stack to remote host via SSH
-# Usage: COMPANION_PASS=... ./deploy.sh
+# Usage: ./deploy.sh   (SSH key auth: $COMPANION_SSH_KEY, default ~/.ssh/companion_rigs_ed25519)
 # Configuration via environment variables (see defaults below)
 #
 # Architecture:
@@ -13,21 +13,24 @@ set -euo pipefail
 
 COMPANION_HOST="${COMPANION_HOST:-companion.lan}"
 COMPANION_USER="${COMPANION_USER:-newlevel}"
-COMPANION_PASS="${COMPANION_PASS:?set COMPANION_PASS to the SSH password of ${COMPANION_USER}@${COMPANION_HOST}}"
+COMPANION_SSH_KEY="${COMPANION_SSH_KEY:-${HOME}/.ssh/companion_rigs_ed25519}"
+if [ ! -r "${COMPANION_SSH_KEY}" ]; then
+  echo "ERROR: SSH key ${COMPANION_SSH_KEY} not readable (set COMPANION_SSH_KEY)" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10"
-
-# sshpass -e reads SSHPASS, so the password never appears on a command line (ps).
-export SSHPASS="${COMPANION_PASS}"
+# Key auth only (airuleset#1385): never fall back to a password prompt.
+SSH_OPTS=(-i "${COMPANION_SSH_KEY}" -o IdentitiesOnly=yes -o BatchMode=yes -o PasswordAuthentication=no
+  -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
 
 remote() {
-  sshpass -e ssh ${SSH_OPTS} "${COMPANION_USER}@${COMPANION_HOST}" "$@"
+  ssh "${SSH_OPTS[@]}" "${COMPANION_USER}@${COMPANION_HOST}" "$@"
 }
 
 remote_copy() {
-  sshpass -e scp ${SSH_OPTS} -r "$@"
+  scp "${SSH_OPTS[@]}" -r "$@"
 }
 
 echo "=== Deploying to ${COMPANION_HOST} ==="
@@ -151,7 +154,7 @@ elif [ -z "${PUBLIC_HOSTS}" ]; then
   exit 1
 elif ! remote "sudo test -f /etc/cloudflared-companion.env"; then
   echo "ERROR: no tunnel token on ${RIG}. Run on dev1:"
-  echo "  COMPANION_ALERT_EMAILS=<alert e-mail> COMPANION_PASS=... host/cloudflare_companion.py install-token ${COMPANION_HOST}"
+  echo "  COMPANION_ALERT_EMAILS=<alert e-mail> host/cloudflare_companion.py install-token ${COMPANION_HOST}"
   echo "  (or deploy without web access: COMPANION_TUNNEL=skip)"
   exit 1
 else

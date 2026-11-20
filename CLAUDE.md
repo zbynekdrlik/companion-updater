@@ -18,6 +18,6 @@ Reason: `deploy.sh` builds the binary locally and installs it over SSH — the d
 
 ## Always applies
 
-- Deploy: `COMPANION_PASS=... ./deploy.sh` (override with `COMPANION_HOST=companion-pp.lan`; the password is never committed — `deploy.sh` has no default). It builds locally and installs over SSH; there is no deploy pipeline.
+- Deploy: `./deploy.sh` (override with `COMPANION_HOST=companion-pp.lan`). SSH is key-only: `~/.ssh/companion_rigs_ed25519` of this account (`COMPANION_SSH_KEY` overrides), no password. It builds locally and installs over SSH; there is no deploy pipeline.
 - `companion/` is the retired Docker setup, kept for reference only — do not extend it.
 - Never claim an upgrade succeeded from an exit status. See the updater rule.

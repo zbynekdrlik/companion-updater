@@ -71,7 +71,7 @@ value in `updater_version`.
 
 - `companion.lan` = companion-snv (x86_64), `companion-pp.lan` = the PP rig.
 - Companion UI on `:8000`, updater dashboard on `:8081`.
-- SSH user `newlevel` (password auth via `sshpass`; the value is not committed).
+- SSH user `newlevel`, key auth only since 2026-11-20 (airuleset#1385): `ssh -i ~/.ssh/companion_rigs_ed25519 -o IdentitiesOnly=yes newlevel@<rig>`. The key belongs to the `companion-updater` account; its public key is in `~newlevel/.ssh/authorized_keys` on both rigs. The newlevel password still exists but no tool here uses it.
 
 ## Time sync
 

@@ -47,7 +47,7 @@ Behaviour the tests pin down:
 
 ## Deploy
 
-- `COMPANION_PASS=… module/deploy.sh <host> [module-id]` (companion.lan = snv, 100.101.72.101 = pp; module-id defaults to `resolume-simple`). It deploys only committed, pushed code.
+- `module/deploy.sh <host> [module-id]` (companion.lan = snv, companion-pp.lan = pp; module-id defaults to `resolume-simple`). SSH key `~/.ssh/companion_rigs_ed25519` (`COMPANION_SSH_KEY` overrides), never a password. It deploys only committed, pushed code.
 - A remote EXIT trap always restarts Companion.
 - NEVER leave a second copy of a module inside `/opt/companion-module-dev`. Companion loads every directory there, and a duplicate id silently wins: a `resolume-simple.old` backup in that directory made Companion run the old version. The fallback lives in `/opt/companion-module-backup/<id>`, and the verify script fails if the id appears more than once.
 - A deploy that passes verification stamps `${DEST}/.verified`, and the backup copy is always a verified module. At install time a stamped `DEST` becomes the backup; an unstamped leftover from a half-failed deploy is simply replaced.
