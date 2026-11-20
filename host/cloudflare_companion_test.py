@@ -14,6 +14,7 @@ import importlib.util
 import io
 import json
 import os
+import tempfile
 import unittest
 import urllib.error
 from unittest import mock
@@ -703,7 +704,11 @@ class Proc:
 
 class InstallToken(unittest.TestCase):
     def setUp(self):
-        env = mock.patch.dict(os.environ, {"COMPANION_PASS": "pw"})
+        key = tempfile.NamedTemporaryFile(prefix="rigkey", delete=False)
+        key.close()
+        self.addCleanup(os.unlink, key.name)
+        self.key = key.name
+        env = mock.patch.dict(os.environ, {"COMPANION_SSH_KEY": self.key})
         env.start()
         self.addCleanup(env.stop)
         self.calls = []
@@ -758,10 +763,22 @@ class InstallToken(unittest.TestCase):
         self.assertEqual(write[1]["input"], f"TUNNEL_TOKEN={run_value(PP)}\n")
         self.assertIn("install -m 0600 -o root -g root /dev/stdin /etc/cloudflared-companion.env", write[0][-1])
         self.assertTrue(all(run_value(PP) not in " ".join(c[0]) for c in self.calls), "the value must never be on a command line")
-        self.assertEqual(write[1]["env"]["SSHPASS"], "pw")
+        cmd = write[0]
+        self.assertEqual(cmd[0], "ssh", "key auth: plain ssh, never sshpass")
+        self.assertEqual(cmd[cmd.index("-i") + 1], self.key)
+        self.assertIn("BatchMode=yes", cmd)
+        self.assertIn("PasswordAuthentication=no", cmd)
+        self.assertNotIn("env", write[1], "no password may be handed to ssh through the environment")
         self.assertTrue(any("systemctl restart cloudflared-companion" in c[0][-1] for c in self.calls))
         self.assertIn("companion-pp", msg)
         self.assertNotIn(run_value(PP), msg)
+
+    def test_unreadable_ssh_key_is_an_error_before_any_ssh(self):
+        with mock.patch.dict(os.environ, {"COMPANION_SSH_KEY": self.key + ".missing"}):
+            with self.assertRaises(cfc.CloudflareError) as ctx:
+                cfc.install_token(self.converged(), "companion-pp.lan", runner=self.runner_for("linux-pp"))
+        self.assertIn("not readable", str(ctx.exception))
+        self.assertEqual(self.calls, [])
 
     def test_snv_rig_gets_the_snv_tunnel(self):
         cfc.install_token(self.converged(), "companion.lan", runner=self.runner_for("companion-snv"))

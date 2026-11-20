@@ -39,7 +39,7 @@ Usage:
       # write the run token of THAT rig's tunnel (chosen by the rig's hostname) to
       # /etc/cloudflared-companion.env (root 0600) and restart cloudflared-companion.
       # Refuses unless `plan` is clean, so it needs COMPANION_ALERT_EMAILS too.
-      # Never printed. SSH: $COMPANION_USER (default newlevel), password $COMPANION_PASS.
+      # Never printed. SSH: $COMPANION_USER (default newlevel), key $COMPANION_SSH_KEY (default ~/.ssh/companion_rigs_ed25519).
 
 Environment:
   CF_TOKEN_FILE            API token file (default: the cloudflare-newlevel-full key file
@@ -612,12 +612,14 @@ def status(cf, out=print):
 
 def ssh(host, remote, runner, stdin=None):
     user = os.environ.get("COMPANION_USER", "newlevel")
-    if "COMPANION_PASS" not in os.environ:
-        raise CloudflareError("set COMPANION_PASS (SSH password of the rig user)")
-    env = dict(os.environ, SSHPASS=os.environ["COMPANION_PASS"])
+    key = os.environ.get("COMPANION_SSH_KEY") or os.path.expanduser("~/.ssh/companion_rigs_ed25519")
+    if not os.access(key, os.R_OK):
+        raise CloudflareError(f"SSH key {key} not readable (set COMPANION_SSH_KEY)")
+    # Key auth only (airuleset#1385): BatchMode never falls back to a password prompt.
     return runner(
-        ["sshpass", "-e", "ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", f"{user}@{host}", remote],
-        input=stdin, text=True, capture_output=True, env=env,
+        ["ssh", "-i", key, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes", "-o", "PasswordAuthentication=no",
+         "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10", f"{user}@{host}", remote],
+        input=stdin, text=True, capture_output=True,
     )
 
 
